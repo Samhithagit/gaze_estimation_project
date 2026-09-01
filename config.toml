@@ -1,0 +1,14 @@
+[model]
+weights = "models/L2CSNet_gaze360.pkl"
+device = "cpu"
+
+[camera]
+camera_id = 0
+
+[input]
+eye_size = 224
+
+[display]
+show_landmarks = true
+show_eye_windows = true
+show_yaw_pitch = true

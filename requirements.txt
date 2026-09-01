@@ -1,0 +1,10 @@
+# Minimal requirements inferred from project imports
+opencv-python
+toml
+numpy
+mediapipe
+torch
+torchvision
+l2cs
+
+# Note: Pin specific versions or install torch with CUDA as needed.
