@@ -1,14 +1,50 @@
 [model]
-weights = "models/L2CSNet_gaze360.pkl"
+weights = "D:\\majorproject\\gaze_project\\models\\L2CSNet_gaze360.pkl"
 device = "cpu"
+
 
 [camera]
 camera_id = 0
 
+
 [input]
 eye_size = 224
 
+
 [display]
-show_landmarks = true
 show_eye_windows = true
 show_yaw_pitch = true
+
+
+[fusion]
+
+# ------------------------------------------------------------
+# Head-eye fusion
+# ------------------------------------------------------------
+
+enabled = true
+
+gaze_weight = 1.0
+head_weight = 1.0
+
+# Coordinate-system signs
+yaw_sign = 1.0
+pitch_sign = 1.0
+
+
+[kalman]
+
+# ------------------------------------------------------------
+# Fixed Kalman filter
+# ------------------------------------------------------------
+
+enabled = true
+
+# Process noise covariance Q
+process_noise = 0.01
+
+# Measurement noise covariance R
+measurement_noise = 1.0
+
+# Initial state uncertainty
+initial_uncertainty = 1.0

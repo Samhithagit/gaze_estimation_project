@@ -1,187 +1,162 @@
 import cv2
 import mediapipe as mp
-import numpy as np
 
-# =========================
-# MediaPipe FaceMesh Setup
-# =========================
 
-mp_face = mp.solutions.face_mesh
+# ============================================================
+# MediaPipe Face Mesh
+# ============================================================
 
-face_mesh = mp_face.FaceMesh(
-    refine_landmarks=True,
+mp_face_mesh = mp.solutions.face_mesh
+
+face_mesh = mp_face_mesh.FaceMesh(
+    static_image_mode=False,
     max_num_faces=1,
+    refine_landmarks=True,
     min_detection_confidence=0.5,
     min_tracking_confidence=0.5
 )
 
-# =========================
-# Eye Landmark Indices
-# =========================
 
-LEFT_EYE = [
-    33, 133, 160, 159, 158, 157,
-    173, 155, 154, 153, 144, 145
-]
+# ============================================================
+# Get FACE crop
+#
+# FIX: default face_size changed from 224 -> 448 to match the
+# official L2CS-Net Gaze360 input resolution. GazeEstimator's
+# transform will also resize to 448x448, so this crop size just
+# needs to avoid unnecessary upscaling; keeping them in sync
+# avoids a redundant double-resize.
+# ============================================================
 
-RIGHT_EYE = [
-    362, 263, 387, 386, 385, 384,
-    398, 382, 381, 380, 374, 373
-]
+def crop_face(frame, landmarks, face_size=448):
 
-# =========================
-# Eye Extraction Function
-# =========================
-
-def process_frame(frame, eye_size=224):
-
-    # Mirror view
-    frame = cv2.flip(frame, 1)
-
-    # Frame dimensions
     h, w, _ = frame.shape
 
-    # Convert BGR → RGB
-    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    xs = []
+    ys = []
 
-    # FaceMesh
-    results = face_mesh.process(rgb_frame)
+    for landmark in landmarks:
+        x = int(landmark.x * w)
+        y = int(landmark.y * h)
 
-    # Default outputs
-    left_eye_resized = None
-    right_eye_resized = None
+        xs.append(x)
+        ys.append(y)
 
-    if results.multi_face_landmarks:
+    x_min = max(0, min(xs))
+    x_max = min(w, max(xs))
+    y_min = max(0, min(ys))
+    y_max = min(h, max(ys))
 
-        for face_landmarks in results.multi_face_landmarks:
+    face_width = x_max - x_min
+    face_height = y_max - y_min
 
-            # =========================
-            # LEFT EYE
-            # =========================
+    if face_width <= 0 or face_height <= 0:
+        return None
 
-            left_eye_points = []
+    # --------------------------------------------------------
+    # FIX: pad to a SQUARE box (not independent x/y padding),
+    # so the resize to face_size x face_size below doesn't
+    # stretch the face non-uniformly. Use the larger of
+    # width/height as the square side, centered on the bbox.
+    # --------------------------------------------------------
 
-            for idx in LEFT_EYE:
+    box_side = int(max(face_width, face_height) * 1.20)  # 20% padding baked in
 
-                lm = face_landmarks.landmark[idx]
+    cx = (x_min + x_max) // 2
+    cy = (y_min + y_max) // 2
 
-                x = int(lm.x * w)
-                y = int(lm.y * h)
+    half = box_side // 2
 
-                left_eye_points.append((x, y))
+    x1 = max(0, cx - half)
+    y1 = max(0, cy - half)
+    x2 = min(w, cx + half)
+    y2 = min(h, cy + half)
 
-                # Draw landmarks
-                cv2.circle(
-                    frame,
-                    (x, y),
-                    2,
-                    (0, 255, 0),
-                    -1
-                )
+    face = frame[y1:y2, x1:x2]
 
-            left_eye_np = np.array(left_eye_points)
+    if face.size == 0:
+        return None
 
-            lx, ly, lw, lh = cv2.boundingRect(
-                left_eye_np
-            )
+    # --------------------------------------------------------
+    # FIX: convert BGR (raw cv2/VideoCapture frame) -> RGB
+    # BEFORE resizing/returning. GazeEstimator.predict_gaze()
+    # does Image.fromarray(...).convert("RGB"), which does NOT
+    # swap channel order -- it assumes the array is already RGB.
+    # Without this conversion the model sees a channel-swapped
+    # (blue/red inverted) face, which silently degrades
+    # confidence even when yaw/pitch look roughly plausible.
+    # --------------------------------------------------------
 
-            padding = 10
+    face = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
 
-            lx = max(lx - padding, 0)
-            ly = max(ly - padding, 0)
+    # --------------------------------------------------------
+    # Resize to model input size (now safe since crop is square)
+    # --------------------------------------------------------
 
-            lw = lw + 2 * padding
-            lh = lh + 2 * padding
-
-            # Draw eye box
-            cv2.rectangle(
-                frame,
-                (lx, ly),
-                (lx + lw, ly + lh),
-                (255, 0, 0),
-                2
-            )
-
-            # Crop left eye
-            left_eye_crop = frame[
-                ly:ly + lh,
-                lx:lx + lw
-            ]
-
-            # =========================
-            # RIGHT EYE
-            # =========================
-
-            right_eye_points = []
-
-            for idx in RIGHT_EYE:
-
-                lm = face_landmarks.landmark[idx]
-
-                x = int(lm.x * w)
-                y = int(lm.y * h)
-
-                right_eye_points.append((x, y))
-
-                cv2.circle(
-                    frame,
-                    (x, y),
-                    2,
-                    (0, 255, 0),
-                    -1
-                )
-
-            right_eye_np = np.array(right_eye_points)
-
-            rx, ry, rw, rh = cv2.boundingRect(
-                right_eye_np
-            )
-
-            rx = max(rx - padding, 0)
-            ry = max(ry - padding, 0)
-
-            rw = rw + 2 * padding
-            rh = rh + 2 * padding
-
-            # Draw eye box
-            cv2.rectangle(
-                frame,
-                (rx, ry),
-                (rx + rw, ry + rh),
-                (255, 0, 0),
-                2
-            )
-
-            # Crop right eye
-            right_eye_crop = frame[
-                ry:ry + rh,
-                rx:rx + rw
-            ]
-
-            # =========================
-            # Resize for CNN
-            # =========================
-
-            if left_eye_crop.size != 0:
-
-                left_eye_resized = cv2.resize(
-                    left_eye_crop,
-                    (eye_size, eye_size)
-                )
-
-            if right_eye_crop.size != 0:
-
-                right_eye_resized = cv2.resize(
-                    right_eye_crop,
-                    (eye_size, eye_size)
-                )
-
-    # =========================
-    # Return Outputs
-    # =========================
-
-    return (
-        frame,
-        left_eye_resized,
-        right_eye_resized
+    face = cv2.resize(
+        face,
+        (face_size, face_size),
+        interpolation=cv2.INTER_AREA
     )
+
+    return face
+
+
+# ============================================================
+# Main face processing function
+# ============================================================
+
+def get_face(frame, face_size=448):
+
+    rgb = cv2.cvtColor(
+        frame,
+        cv2.COLOR_BGR2RGB
+    )
+
+    results = face_mesh.process(rgb)
+
+    if not results.multi_face_landmarks:
+        return frame, None
+
+    face_landmarks = results.multi_face_landmarks[0]
+    landmarks = face_landmarks.landmark
+
+    # ========================================================
+    # Crop entire face
+    # ========================================================
+
+    face_crop = crop_face(
+        frame,
+        landmarks,
+        face_size
+    )
+
+    # ========================================================
+    # Draw face bounding box
+    # ========================================================
+
+    h, w, _ = frame.shape
+
+    xs = [
+        int(lm.x * w)
+        for lm in landmarks
+    ]
+
+    ys = [
+        int(lm.y * h)
+        for lm in landmarks
+    ]
+
+    x1 = max(0, min(xs))
+    x2 = min(w, max(xs))
+    y1 = max(0, min(ys))
+    y2 = min(h, max(ys))
+
+    cv2.rectangle(
+        frame,
+        (x1, y1),
+        (x2, y2),
+        (0, 255, 0),
+        2
+    )
+
+    return frame, face_crop
