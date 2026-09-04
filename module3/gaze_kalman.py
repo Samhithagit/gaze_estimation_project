@@ -290,6 +290,28 @@ class AdaptiveRKalmanGaze(FixedKalmanGaze):
 # Use this as your headline "Proposed / AKF" method.
 # ============================================================
 
+# ============================================================
+# PROPOSED ADAPTIVE Q + R KALMAN FILTER
+#
+# Proposed method:
+#
+# 1. Q adapts according to the magnitude of innovation
+#    -> large change = likely real gaze movement
+#    -> increase Q so the filter responds faster
+#
+# 2. R adapts according to gaze confidence
+#    -> high confidence = reliable measurement
+#    -> lower R = trust measurement more
+#
+# 3. Confidence is smoothed using an exponential moving average
+#    -> avoids sudden changes in R caused by noisy confidence
+#
+# 4. Q and R are bounded
+#    -> prevents unstable Kalman gain
+#
+# This is the proposed adaptive mechanism.
+# ============================================================
+
 class AdaptiveQRKalmanGaze(FixedKalmanGaze):
 
     def __init__(
@@ -297,97 +319,449 @@ class AdaptiveQRKalmanGaze(FixedKalmanGaze):
         process_noise=0.01,
         measurement_noise=1.0,
         initial_uncertainty=1.0,
+
+        # Q adaptation
         q_min=0.001,
         q_max=0.20,
         q_adaptation_rate=0.10,
+
+        # R adaptation
         r_min=0.10,
         r_max=10.0,
-        conf_window_size=60,
+
+        # Confidence smoothing
+        confidence_alpha=0.20,
+
+        # Innovation smoothing
+        innovation_alpha=0.20
     ):
+
         super().__init__(
             process_noise=process_noise,
             measurement_noise=measurement_noise,
             initial_uncertainty=initial_uncertainty
         )
+
+        # ----------------------------------------------------
+        # Q PARAMETERS
+        # ----------------------------------------------------
+
         self.q_min = float(q_min)
         self.q_max = float(q_max)
-        self.q_adaptation_rate = float(q_adaptation_rate)
+        self.q_adaptation_rate = float(
+            q_adaptation_rate
+        )
+
+        # ----------------------------------------------------
+        # R PARAMETERS
+        # ----------------------------------------------------
+
         self.r_min = float(r_min)
         self.r_max = float(r_max)
+
+        # ----------------------------------------------------
+        # SMOOTHING PARAMETERS
+        # ----------------------------------------------------
+
+        self.confidence_alpha = float(
+            confidence_alpha
+        )
+
+        self.innovation_alpha = float(
+            innovation_alpha
+        )
+
+        # ----------------------------------------------------
+        # CURRENT VALUES
+        # ----------------------------------------------------
 
         self.current_q = self.process_noise
         self.current_r = self.measurement_noise
 
-        self.conf_window_size = conf_window_size
-        self._conf_history = []
+        # ----------------------------------------------------
+        # INTERNAL STATE
+        # ----------------------------------------------------
 
-    def _normalize_confidence(self, confidence):
-        self._conf_history.append(confidence)
-        if len(self._conf_history) > self.conf_window_size:
-            self._conf_history.pop(0)
+        self.smoothed_confidence = None
+        self.smoothed_innovation = None
 
-        if len(self._conf_history) < 5:
-            return confidence
+    # ========================================================
+    # RESET
+    # ========================================================
 
-        c_min = min(self._conf_history)
-        c_max = max(self._conf_history)
+    def reset(self):
 
-        if c_max - c_min < 1e-6:
-            return 0.5
+        super().reset()
 
-        return (confidence - c_min) / (c_max - c_min)
+        self.current_q = self.process_noise
+        self.current_r = self.measurement_noise
 
-    def update(self, yaw, pitch, confidence=None):
+        self.smoothed_confidence = None
+        self.smoothed_innovation = None
+
+    # ========================================================
+    # CONFIDENCE SMOOTHING
+    # ========================================================
+
+    def _smooth_confidence(self, confidence):
+
+        confidence = float(
+            np.clip(confidence, 0.0, 1.0)
+        )
+
+        if self.smoothed_confidence is None:
+
+            self.smoothed_confidence = confidence
+
+        else:
+
+            self.smoothed_confidence = (
+
+                self.confidence_alpha * confidence
+
+                +
+
+                (1.0 - self.confidence_alpha)
+                * self.smoothed_confidence
+
+            )
+
+        return self.smoothed_confidence
+
+    # ========================================================
+    # INNOVATION SMOOTHING
+    # ========================================================
+
+    def _smooth_innovation(self, innovation):
+
+        if self.smoothed_innovation is None:
+
+            self.smoothed_innovation = innovation
+
+        else:
+
+            self.smoothed_innovation = (
+
+                self.innovation_alpha * innovation
+
+                +
+
+                (1.0 - self.innovation_alpha)
+                * self.smoothed_innovation
+
+            )
+
+        return self.smoothed_innovation
+
+    # ========================================================
+    # UPDATE
+    # ========================================================
+
+    def update(
+        self,
+        yaw,
+        pitch,
+        confidence=None
+    ):
+
+        # ----------------------------------------------------
+        # VALIDATE MEASUREMENT
+        # ----------------------------------------------------
+
         if yaw is None or pitch is None:
+
             return None
 
         try:
-            measurement = np.array([float(yaw), float(pitch)], dtype=np.float64)
+
+            measurement = np.array(
+                [
+                    float(yaw),
+                    float(pitch)
+                ],
+                dtype=np.float64
+            )
+
         except (TypeError, ValueError):
+
             return None
 
-        if not np.all(np.isfinite(measurement)):
+        if not np.all(
+            np.isfinite(measurement)
+        ):
+
             return None
 
-        # ---- R from normalized confidence ----
-        if confidence is not None:
-            norm_conf = self._normalize_confidence(float(confidence))
-            norm_conf = float(np.clip(norm_conf, 0.0, 1.0))
-            adaptive_r = self.r_max - norm_conf * (self.r_max - self.r_min)
-        else:
-            adaptive_r = self.measurement_noise
-        self.current_r = float(adaptive_r)
-        self.R = np.eye(2, dtype=np.float64) * self.current_r
+        # ====================================================
+        # INITIALIZATION
+        # ====================================================
 
-        # ---- INITIALIZATION ----
         if self.state is None:
+
             self.state = measurement.copy()
+
             self.current_q = self.process_noise
-            self.Q = np.eye(2, dtype=np.float64) * self.current_q
-            return {"yaw": float(self.state[0]), "pitch": float(self.state[1])}
+            self.current_r = self.measurement_noise
 
-        # ---- Q from innovation (real motion -> react faster) ----
-        predicted_state_preview = self.A @ self.state
-        innovation_preview = measurement - self.H @ predicted_state_preview
-        innovation_magnitude = np.linalg.norm(innovation_preview)
+            self.Q = (
+                np.eye(2, dtype=np.float64)
+                * self.current_q
+            )
 
-        adaptive_q = self.process_noise + self.q_adaptation_rate * innovation_magnitude ** 2
-        adaptive_q = np.clip(adaptive_q, self.q_min, self.q_max)
-        self.current_q = float(adaptive_q)
-        self.Q = np.eye(2, dtype=np.float64) * self.current_q
+            self.R = (
+                np.eye(2, dtype=np.float64)
+                * self.current_r
+            )
 
-        # ---- PREDICTION (with updated Q) ----
-        predicted_state = self.A @ self.state
-        predicted_covariance = self.A @ self.P @ self.A.T + self.Q
+            if confidence is not None:
 
-        # ---- INNOVATION / UPDATE (with confidence-based R) ----
-        innovation = measurement - self.H @ predicted_state
-        innovation_covariance = self.H @ predicted_covariance @ self.H.T + self.R
+                self.smoothed_confidence = float(
+                    np.clip(
+                        confidence,
+                        0.0,
+                        1.0
+                    )
+                )
 
-        kalman_gain = predicted_covariance @ self.H.T @ np.linalg.inv(innovation_covariance)
-        self.state = predicted_state + kalman_gain @ innovation
+            return {
+                "yaw": float(self.state[0]),
+                "pitch": float(self.state[1])
+            }
 
-        identity = np.eye(2, dtype=np.float64)
-        self.P = (identity - kalman_gain @ self.H) @ predicted_covariance
+        # ====================================================
+        # PREDICTION
+        # ====================================================
 
-        return {"yaw": float(self.state[0]), "pitch": float(self.state[1])}
+        predicted_state = (
+            self.A @ self.state
+        )
+
+        # ====================================================
+        # INNOVATION
+        # ====================================================
+
+        innovation_vector = (
+
+            measurement
+            -
+            self.H @ predicted_state
+
+        )
+
+        innovation_magnitude = float(
+            np.linalg.norm(
+                innovation_vector
+            )
+        )
+
+        # Smooth innovation so a single noisy
+        # frame does not cause an extreme Q.
+
+        smoothed_innovation = (
+            self._smooth_innovation(
+                innovation_magnitude
+            )
+        )
+
+        # ====================================================
+        # ADAPTIVE Q
+        #
+        # Large innovation:
+        #     likely real gaze movement
+        #     -> increase Q
+        #
+        # Small innovation:
+        #     stable gaze
+        #     -> keep Q small
+        # ====================================================
+
+        adaptive_q = (
+
+            self.process_noise
+
+            +
+
+            self.q_adaptation_rate
+            *
+            (smoothed_innovation ** 2)
+
+        )
+
+        adaptive_q = float(
+            np.clip(
+                adaptive_q,
+                self.q_min,
+                self.q_max
+            )
+        )
+
+        self.current_q = adaptive_q
+
+        self.Q = (
+            np.eye(2, dtype=np.float64)
+            *
+            self.current_q
+        )
+
+        # ====================================================
+        # ADAPTIVE R
+        #
+        # High confidence:
+        #     trust measurement
+        #     -> small R
+        #
+        # Low confidence:
+        #     distrust measurement
+        #     -> large R
+        # ====================================================
+
+        if confidence is not None:
+
+            smoothed_confidence = (
+                self._smooth_confidence(
+                    confidence
+                )
+            )
+
+            # Confidence is assumed to be [0, 1].
+            #
+            # confidence = 1
+            #     -> R = r_min
+            #
+            # confidence = 0
+            #     -> R = r_max
+
+            adaptive_r = (
+
+                self.r_max
+
+                -
+
+                smoothed_confidence
+                *
+                (
+                    self.r_max
+                    -
+                    self.r_min
+                )
+
+            )
+
+        else:
+
+            adaptive_r = self.measurement_noise
+
+        adaptive_r = float(
+            np.clip(
+                adaptive_r,
+                self.r_min,
+                self.r_max
+            )
+        )
+
+        self.current_r = adaptive_r
+
+        self.R = (
+            np.eye(2, dtype=np.float64)
+            *
+            self.current_r
+        )
+
+        # ====================================================
+        # PREDICTED COVARIANCE
+        # ====================================================
+
+        predicted_covariance = (
+
+            self.A
+            @
+            self.P
+            @
+            self.A.T
+
+            +
+
+            self.Q
+
+        )
+
+        # ====================================================
+        # INNOVATION COVARIANCE
+        # ====================================================
+
+        innovation_covariance = (
+
+            self.H
+            @
+            predicted_covariance
+            @
+            self.H.T
+
+            +
+
+            self.R
+
+        )
+
+        # ====================================================
+        # KALMAN GAIN
+        # ====================================================
+
+        kalman_gain = (
+
+            predicted_covariance
+            @
+            self.H.T
+            @
+            np.linalg.inv(
+                innovation_covariance
+            )
+
+        )
+
+        # ====================================================
+        # STATE UPDATE
+        # ====================================================
+
+        self.state = (
+
+            predicted_state
+
+            +
+
+            kalman_gain
+            @
+            innovation_vector
+
+        )
+
+        # ====================================================
+        # COVARIANCE UPDATE
+        # ====================================================
+
+        identity = np.eye(
+            2,
+            dtype=np.float64
+        )
+
+        self.P = (
+
+            identity
+            -
+            kalman_gain @ self.H
+
+        ) @ predicted_covariance
+
+        # ====================================================
+        # RETURN
+        # ====================================================
+
+        return {
+            "yaw": float(
+                self.state[0]
+            ),
+
+            "pitch": float(
+                self.state[1]
+            )
+        }

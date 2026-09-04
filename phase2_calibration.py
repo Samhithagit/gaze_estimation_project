@@ -483,22 +483,26 @@ def main():
 
         adaptive_qr = AdaptiveQRKalmanGaze(
 
-            process_noise=KALMAN_PROCESS_NOISE,
+    process_noise=KALMAN_PROCESS_NOISE,
 
-            measurement_noise=KALMAN_MEASUREMENT_NOISE,
+    measurement_noise=KALMAN_MEASUREMENT_NOISE,
 
-            initial_uncertainty=KALMAN_INITIAL_UNCERTAINTY,
+    initial_uncertainty=KALMAN_INITIAL_UNCERTAINTY,
 
-            q_min=ADAPTIVE_Q_MIN,
+    q_min=ADAPTIVE_Q_MIN,
 
-            q_max=ADAPTIVE_Q_MAX,
+    q_max=ADAPTIVE_Q_MAX,
 
-            q_adaptation_rate=ADAPTIVE_Q_RATE,
+    q_adaptation_rate=ADAPTIVE_Q_RATE,
 
-            r_min=ADAPTIVE_R_MIN,
+    r_min=ADAPTIVE_R_MIN,
 
-            r_max=ADAPTIVE_R_MAX
-        )
+    r_max=ADAPTIVE_R_MAX,
+
+    confidence_alpha=0.20,
+
+    innovation_alpha=0.20
+)
 
 
         point_start = time.perf_counter()
