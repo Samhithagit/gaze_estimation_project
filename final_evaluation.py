@@ -1,477 +1,292 @@
-import pandas as pd
-import numpy as np
-import sys
 import os
+import sys
+import csv
+import numpy as np
+
+from ridge_gaze_mapper import RidgeGazeMapper
+
+from module3.gaze_kalman import (
+    FixedKalmanGaze,
+    AdaptiveQKalmanGaze,
+    AdaptiveRKalmanGaze,
+    AdaptiveQRKalmanGaze
+)
 
 
 # ============================================================
-# INPUT
+# INPUT FILES
 # ============================================================
 
-if len(sys.argv) >= 2:
+if len(sys.argv) >= 3:
 
-    INPUT_FILE = sys.argv[1]
+    CALIBRATION_FILE = sys.argv[1]
+
+    EVALUATION_FILE = sys.argv[2]
 
 else:
 
-    INPUT_FILE = "unified_evaluation.csv"
-
-
-# ============================================================
-# READ
-# ============================================================
-
-df = pd.read_csv(
-    INPUT_FILE
-)
-
-
-print()
-print("=" * 100)
-print("FINAL GAZE EVALUATION")
-print("=" * 100)
-
-print()
-
-print(
-    f"Total evaluation samples: {len(df)}"
-)
-
-print(
-    f"Number of fixation points: "
-    f"{df['point_idx'].nunique()}"
-)
-
-print()
-
-
-# ============================================================
-# METHODS
-#
-# FIX: "Proposed" previously pointed at kalman_yaw/kalman_pitch
-# (Fixed Kalman) -- that's an ablation baseline, not your novel
-# contribution. Renamed to "Fixed KF" for clarity, and "Proposed"
-# now correctly points at adaptive_qr_yaw/adaptive_qr_pitch
-# (the combined confidence-gated-R + innovation-gated-Q filter),
-# which matches your report's actual AKF architecture.
-# ============================================================
-
-METHODS = {
-
-    "Baseline": (
-        "raw_gaze_yaw",
-        "raw_gaze_pitch"
-    ),
-
-    "Method 2": (
-        "fused_yaw",
-        "fused_pitch"
-    ),
-
-    "Fixed KF": (
-        "kalman_yaw",
-        "kalman_pitch"
-    ),
-
-    "Adaptive Q": (
-        "adaptive_q_yaw",
-        "adaptive_q_pitch"
-    ),
-
-    "Adaptive R": (
-        "adaptive_r_yaw",
-        "adaptive_r_pitch"
-    ),
-
-    "Proposed": (
-        "adaptive_qr_yaw",
-        "adaptive_qr_pitch"
-    )
-}
-
-
-# ============================================================
-# MAPPING
-# ============================================================
-
-def make_design_matrix(
-    yaw,
-    pitch
-):
-
-    yaw = np.asarray(yaw)
-
-    pitch = np.asarray(pitch)
-
-    return np.stack([
-
-        np.ones_like(yaw),
-
-        yaw,
-        pitch,
-
-        yaw ** 2,
-        pitch ** 2,
-
-        yaw * pitch
-
-    ], axis=1)
-
-
-def fit_mapping(
-    yaw,
-    pitch,
-    target_x,
-    target_y
-):
-
-    A = make_design_matrix(
-        yaw,
-        pitch
+    print(
+        "Usage:"
     )
 
-
-    coef_x, _, _, _ = np.linalg.lstsq(
-
-        A,
-
-        np.asarray(target_x),
-
-        rcond=None
-    )
-
-
-    coef_y, _, _, _ = np.linalg.lstsq(
-
-        A,
-
-        np.asarray(target_y),
-
-        rcond=None
-    )
-
-
-    return coef_x, coef_y
-
-
-def predict_screen_position(
-    yaw,
-    pitch,
-    coef_x,
-    coef_y
-):
-
-    A = make_design_matrix(
-        yaw,
-        pitch
-    )
-
-
-    predicted_x = A @ coef_x
-
-    predicted_y = A @ coef_y
-
-
-    return predicted_x, predicted_y
-
-
-# ============================================================
-# METRICS
-# ============================================================
-
-def calculate_metrics(
-    data,
-    predicted_x,
-    predicted_y
-):
-
-    target_x = data[
-        "target_x"
-    ].values
-
-    target_y = data[
-        "target_y"
-    ].values
-
-
-    # --------------------------------------------------------
-    # FRAME ERROR
-    # --------------------------------------------------------
-
-    errors = np.sqrt(
-
-        (
-            predicted_x
-            -
-            target_x
-        ) ** 2
-
-        +
-
-        (
-            predicted_y
-            -
-            target_y
-        ) ** 2
-
-    )
-
-
-    # --------------------------------------------------------
-    # MAE
-    # --------------------------------------------------------
-
-    mae = float(
-        np.mean(errors)
-    )
-
-
-    # --------------------------------------------------------
-    # RMSE
-    # --------------------------------------------------------
-
-    rmse = float(
-
-        np.sqrt(
-            np.mean(
-                errors ** 2
-            )
-        )
-
-    )
-
-
-    # --------------------------------------------------------
-    # JITTER
-    # --------------------------------------------------------
-
-    jitter_values = []
-
-
-    for point_idx in data[
-        "point_idx"
-    ].unique():
-
-        mask = (
-
-            data["point_idx"].values
-            ==
-            point_idx
-
-        )
-
-
-        px = predicted_x[mask]
-
-        py = predicted_y[mask]
-
-
-        if len(px) < 2:
-
-            continue
-
-
-        jitter_x = np.std(px)
-
-        jitter_y = np.std(py)
-
-
-        jitter = np.sqrt(
-
-            jitter_x ** 2
-
-            +
-
-            jitter_y ** 2
-
-        )
-
-
-        jitter_values.append(
-            jitter
-        )
-
-
-    if len(jitter_values) > 0:
-
-        mean_jitter = float(
-            np.mean(
-                jitter_values
-            )
-        )
-
-        jitter_std = float(
-            np.std(
-                jitter_values
-            )
-        )
-
-        maximum_jitter = float(
-            np.max(
-                jitter_values
-            )
-        )
-
-    else:
-
-        mean_jitter = np.nan
-
-        jitter_std = np.nan
-
-        maximum_jitter = np.nan
-
-
-    # --------------------------------------------------------
-    # TOTAL VARIATION
-    # --------------------------------------------------------
-
-    total_variation_values = []
-
-
-    for point_idx in data[
-        "point_idx"
-    ].unique():
-
-        mask = (
-
-            data["point_idx"].values
-            ==
-            point_idx
-
-        )
-
-
-        px = predicted_x[mask]
-
-        py = predicted_y[mask]
-
-
-        if len(px) < 2:
-
-            continue
-
-
-        dx = np.diff(px)
-
-        dy = np.diff(py)
-
-
-        movement = np.sqrt(
-
-            dx ** 2
-
-            +
-
-            dy ** 2
-
-        )
-
-
-        total_variation_values.append(
-
-            np.sum(movement)
-
-        )
-
-
-    if len(total_variation_values) > 0:
-
-        total_variation = float(
-
-            np.mean(
-                total_variation_values
-            )
-
-        )
-
-    else:
-
-        total_variation = np.nan
-
-
-    return {
-
-        "MAE": mae,
-
-        "RMSE": rmse,
-
-        "Mean Jitter": mean_jitter,
-
-        "Jitter Std": jitter_std,
-
-        "Maximum Jitter": maximum_jitter,
-
-        "Total Variation": total_variation
-
-    }
-
-
-# ============================================================
-# EVALUATE
-# ============================================================
-
-results = {}
-
-
-for method_name, (
-    yaw_column,
-    pitch_column
-) in METHODS.items():
+    print()
 
     print(
-        f"Calculating {method_name}..."
+        "python final_evaluation.py "
+        "calibration_data.csv "
+        "evaluation_data.csv"
+    )
+
+    sys.exit(1)
+
+
+# ============================================================
+# KALMAN PARAMETERS
+# ============================================================
+
+KALMAN_PROCESS_NOISE = 25.0
+
+KALMAN_MEASUREMENT_NOISE = 100.0
+
+KALMAN_INITIAL_UNCERTAINTY = 100.0
+
+
+# Adaptive Q
+
+ADAPTIVE_Q_MIN = 1.0
+
+ADAPTIVE_Q_MAX = 2500.0
+
+ADAPTIVE_Q_RATE = 0.001
+
+
+# Adaptive R
+
+ADAPTIVE_R_MIN = 25.0
+
+ADAPTIVE_R_MAX = 1000.0
+
+
+# ============================================================
+# LOAD CSV
+# ============================================================
+
+def load_csv(filename):
+
+    if not os.path.exists(filename):
+
+        raise FileNotFoundError(
+            filename
+        )
+
+
+    rows = []
+
+    with open(
+
+        filename,
+
+        "r",
+
+        newline=""
+
+    ) as f:
+
+        reader = csv.DictReader(f)
+
+        for row in reader:
+
+            rows.append(row)
+
+
+    return rows
+
+
+# ============================================================
+# FLOAT
+# ============================================================
+
+def to_float(value):
+
+    try:
+
+        return float(value)
+
+    except (
+
+        TypeError,
+        ValueError
+
+    ):
+
+        return None
+
+
+# ============================================================
+# VALID ROWS
+# ============================================================
+
+def valid_rows(rows):
+
+    output = []
+
+
+    required = [
+
+        "raw_gaze_yaw",
+        "raw_gaze_pitch",
+        "raw_confidence",
+
+        "head_yaw",
+        "head_pitch",
+        "head_roll",
+
+        "target_x",
+        "target_y",
+
+        "point_idx"
+
+    ]
+
+
+    for row in rows:
+
+        values = {}
+
+        valid = True
+
+
+        for column in required:
+
+            value = to_float(
+                row.get(column)
+            )
+
+
+            if value is None:
+
+                valid = False
+
+                break
+
+
+            values[column] = value
+
+
+        if valid:
+
+            output.append(
+                values
+            )
+
+
+    return output
+
+
+# ============================================================
+# FIT RIDGE
+# ============================================================
+
+def fit_mappers(rows):
+
+    yaw = np.array(
+
+        [
+            r["raw_gaze_yaw"]
+            for r in rows
+        ],
+
+        dtype=float
+
     )
 
 
-    valid = (
+    pitch = np.array(
 
-        df[yaw_column].notna()
+        [
+            r["raw_gaze_pitch"]
+            for r in rows
+        ],
 
-        &
-
-        df[pitch_column].notna()
-
-        &
-
-        df["target_x"].notna()
-
-        &
-
-        df["target_y"].notna()
+        dtype=float
 
     )
 
 
-    data = df[
-        valid
-    ].copy()
+    target_x = np.array(
+
+        [
+            r["target_x"]
+            for r in rows
+        ],
+
+        dtype=float
+
+    )
 
 
-    yaw = data[
-        yaw_column
-    ].values
+    target_y = np.array(
+
+        [
+            r["target_y"]
+            for r in rows
+        ],
+
+        dtype=float
+
+    )
 
 
-    pitch = data[
-        pitch_column
-    ].values
+    head_yaw = np.array(
+
+        [
+            r["head_yaw"]
+            for r in rows
+        ],
+
+        dtype=float
+
+    )
 
 
-    target_x = data[
-        "target_x"
-    ].values
+    head_pitch = np.array(
+
+        [
+            r["head_pitch"]
+            for r in rows
+        ],
+
+        dtype=float
+
+    )
 
 
-    target_y = data[
-        "target_y"
-    ].values
+    head_roll = np.array(
+
+        [
+            r["head_roll"]
+            for r in rows
+        ],
+
+        dtype=float
+
+    )
 
 
-    # --------------------------------------------------------
-    # FIT
-    # --------------------------------------------------------
+    # ========================================================
+    # BASELINE
+    # ========================================================
 
-    coef_x, coef_y = fit_mapping(
+    baseline_mapper = RidgeGazeMapper(
+
+        feature_mode="gaze_only",
+
+        alpha=1e-6
+
+    )
+
+
+    baseline_mapper.fit(
 
         yaw,
 
@@ -484,290 +299,1220 @@ for method_name, (
     )
 
 
-    # --------------------------------------------------------
-    # PREDICT
-    # --------------------------------------------------------
+    # ========================================================
+    # METHOD 2
+    # ========================================================
 
-    predicted_x, predicted_y = (
+    method2_mapper = RidgeGazeMapper(
 
-        predict_screen_position(
+        feature_mode="gaze_head",
+
+        alpha=0.01
+
+    )
+
+
+    method2_mapper.fit(
+
+        yaw,
+
+        pitch,
+
+        target_x,
+
+        target_y,
+
+        head_yaw=head_yaw,
+
+        head_pitch=head_pitch,
+
+        head_roll=head_roll
+
+    )
+
+
+    return (
+
+        baseline_mapper,
+
+        method2_mapper
+
+    )
+
+
+# ============================================================
+# PREDICT ONE ROW
+# ============================================================
+
+def predict(
+
+    mapper,
+
+    row,
+
+    use_head
+
+):
+
+    yaw = np.array(
+
+        [row["raw_gaze_yaw"]],
+
+        dtype=float
+
+    )
+
+
+    pitch = np.array(
+
+        [row["raw_gaze_pitch"]],
+
+        dtype=float
+
+    )
+
+
+    if use_head:
+
+        prediction = mapper.predict(
 
             yaw,
 
             pitch,
 
-            coef_x,
+            head_yaw=np.array(
+                [row["head_yaw"]],
+                dtype=float
+            ),
 
-            coef_y
+            head_pitch=np.array(
+                [row["head_pitch"]],
+                dtype=float
+            ),
+
+            head_roll=np.array(
+                [row["head_roll"]],
+                dtype=float
+            )
+
+        )
+
+    else:
+
+        prediction = mapper.predict(
+
+            yaw,
+
+            pitch
+
+        )
+
+
+    if isinstance(
+
+        prediction,
+
+        dict
+
+    ):
+
+        x = prediction["x"]
+
+        y = prediction["y"]
+
+    else:
+
+        x = prediction[0]
+
+        y = prediction[1]
+
+
+    x = np.asarray(x).reshape(-1)[0]
+
+    y = np.asarray(y).reshape(-1)[0]
+
+
+    return float(x), float(y)
+
+
+# ============================================================
+# KALMAN FILTERS
+# ============================================================
+
+def create_filters():
+
+    fixed = FixedKalmanGaze(
+
+        process_noise=KALMAN_PROCESS_NOISE,
+
+        measurement_noise=KALMAN_MEASUREMENT_NOISE,
+
+        initial_uncertainty=KALMAN_INITIAL_UNCERTAINTY
+
+    )
+
+
+    adaptive_q = AdaptiveQKalmanGaze(
+
+        process_noise=KALMAN_PROCESS_NOISE,
+
+        measurement_noise=KALMAN_MEASUREMENT_NOISE,
+
+        initial_uncertainty=KALMAN_INITIAL_UNCERTAINTY,
+
+        q_min=ADAPTIVE_Q_MIN,
+
+        q_max=ADAPTIVE_Q_MAX,
+
+        adaptation_rate=ADAPTIVE_Q_RATE
+
+    )
+
+
+    adaptive_r = AdaptiveRKalmanGaze(
+
+        process_noise=KALMAN_PROCESS_NOISE,
+
+        measurement_noise=KALMAN_MEASUREMENT_NOISE,
+
+        initial_uncertainty=KALMAN_INITIAL_UNCERTAINTY,
+
+        r_min=ADAPTIVE_R_MIN,
+
+        r_max=ADAPTIVE_R_MAX
+
+    )
+
+
+    adaptive_qr = AdaptiveQRKalmanGaze(
+
+        process_noise=KALMAN_PROCESS_NOISE,
+
+        measurement_noise=KALMAN_MEASUREMENT_NOISE,
+
+        initial_uncertainty=KALMAN_INITIAL_UNCERTAINTY,
+
+        q_min=ADAPTIVE_Q_MIN,
+
+        q_max=ADAPTIVE_Q_MAX,
+
+        q_adaptation_rate=ADAPTIVE_Q_RATE,
+
+        r_min=ADAPTIVE_R_MIN,
+
+        r_max=ADAPTIVE_R_MAX
+
+    )
+
+
+    return (
+
+        fixed,
+        adaptive_q,
+        adaptive_r,
+        adaptive_qr
+
+    )
+
+
+# ============================================================
+# UPDATE FILTER
+# ============================================================
+
+def update_filter(
+
+    filter_object,
+
+    x,
+
+    y,
+
+    confidence=None
+
+):
+
+    result = filter_object.update(
+
+        x,
+
+        y,
+
+        confidence
+
+    )
+
+
+    return (
+
+        float(result["x"]),
+
+        float(result["y"])
+
+    )
+
+
+# ============================================================
+# EVALUATION
+# ============================================================
+
+def evaluate(
+
+    rows,
+
+    baseline_mapper,
+
+    method2_mapper
+
+):
+
+    (
+
+        fixed,
+
+        adaptive_q,
+
+        adaptive_r,
+
+        adaptive_qr
+
+    ) = create_filters()
+
+
+    results = []
+
+
+    for row in rows:
+
+
+        # ====================================================
+        # BASELINE
+        # ====================================================
+
+        baseline_x, baseline_y = predict(
+
+            baseline_mapper,
+
+            row,
+
+            use_head=False
+
+        )
+
+
+        # ====================================================
+        # METHOD 2 RIDGE
+        # ====================================================
+
+        ridge_x, ridge_y = predict(
+
+            method2_mapper,
+
+            row,
+
+            use_head=True
+
+        )
+
+
+        # ====================================================
+        # FIXED KF
+        # ====================================================
+
+        fixed_x, fixed_y = update_filter(
+
+            fixed,
+
+            ridge_x,
+
+            ridge_y
+
+        )
+
+
+        # ====================================================
+        # ADAPTIVE Q
+        # ====================================================
+
+        q_x, q_y = update_filter(
+
+            adaptive_q,
+
+            ridge_x,
+
+            ridge_y
+
+        )
+
+
+        # ====================================================
+        # ADAPTIVE R
+        # ====================================================
+
+        r_x, r_y = update_filter(
+
+            adaptive_r,
+
+            ridge_x,
+
+            ridge_y,
+
+            row["raw_confidence"]
+
+        )
+
+
+        # ====================================================
+        # ADAPTIVE Q + R
+        # ====================================================
+
+        qr_x, qr_y = update_filter(
+
+            adaptive_qr,
+
+            ridge_x,
+
+            ridge_y,
+
+            row["raw_confidence"]
+
+        )
+
+
+        # ====================================================
+        # STORE
+        # ====================================================
+
+        results.append({
+
+            "point_idx":
+                int(row["point_idx"]),
+
+            "target_x":
+                row["target_x"],
+
+            "target_y":
+                row["target_y"],
+
+            "baseline_x":
+                baseline_x,
+
+            "baseline_y":
+                baseline_y,
+
+            "ridge_x":
+                ridge_x,
+
+            "ridge_y":
+                ridge_y,
+
+            "fixed_kf_x":
+                fixed_x,
+
+            "fixed_kf_y":
+                fixed_y,
+
+            "adaptive_q_x":
+                q_x,
+
+            "adaptive_q_y":
+                q_y,
+
+            "adaptive_r_x":
+                r_x,
+
+            "adaptive_r_y":
+                r_y,
+
+            "adaptive_qr_x":
+                qr_x,
+
+            "adaptive_qr_y":
+                qr_y,
+
+            "confidence":
+                row["raw_confidence"]
+
+        })
+
+
+    return results
+
+
+# ============================================================
+# METRICS
+# ============================================================
+
+def calculate_metrics(
+
+    results,
+
+    x_key,
+
+    y_key
+
+):
+
+    errors = []
+
+
+    for row in results:
+
+        dx = (
+
+            row[x_key]
+            -
+            row["target_x"]
+
+        )
+
+
+        dy = (
+
+            row[y_key]
+            -
+            row["target_y"]
+
+        )
+
+
+        errors.append(
+
+            np.sqrt(
+
+                dx ** 2
+                +
+                dy ** 2
+
+            )
+
+        )
+
+
+    errors = np.asarray(
+        errors,
+        dtype=float
+    )
+
+
+    return {
+
+        "MAE":
+            float(np.mean(errors)),
+
+        "RMSE":
+            float(
+                np.sqrt(
+                    np.mean(
+                        errors ** 2
+                    )
+                )
+            ),
+
+        "Median":
+            float(
+                np.median(errors)
+            ),
+
+        "P95":
+            float(
+                np.percentile(
+                    errors,
+                    95
+                )
+            )
+
+    }
+
+
+# ============================================================
+# JITTER
+# ============================================================
+
+def calculate_jitter(
+
+    results,
+
+    x_key,
+
+    y_key
+
+):
+
+    values = []
+
+
+    point_ids = sorted(
+
+        set(
+
+            r["point_idx"]
+
+            for r in results
 
         )
 
     )
 
 
-    # --------------------------------------------------------
-    # METRICS
-    # --------------------------------------------------------
+    for point_idx in point_ids:
 
-    results[
-        method_name
-    ] = calculate_metrics(
+        rows = [
 
-        data,
+            r
 
-        predicted_x,
+            for r in results
 
-        predicted_y
+            if r["point_idx"]
+            ==
+            point_idx
+
+        ]
+
+
+        if len(rows) < 2:
+
+            continue
+
+
+        x = np.array(
+
+            [
+                r[x_key]
+                for r in rows
+            ],
+
+            dtype=float
+
+        )
+
+
+        y = np.array(
+
+            [
+                r[y_key]
+                for r in rows
+            ],
+
+            dtype=float
+
+        )
+
+
+        dx = np.diff(x)
+
+        dy = np.diff(y)
+
+
+        movement = np.sqrt(
+
+            dx ** 2
+            +
+            dy ** 2
+
+        )
+
+
+        values.extend(
+            movement.tolist()
+        )
+
+
+    if len(values) == 0:
+
+        return 0.0
+
+
+    return float(
+        np.mean(values)
+    )
+
+
+# ============================================================
+# TOTAL VARIATION
+# ============================================================
+
+def calculate_total_variation(
+
+    results,
+
+    x_key,
+
+    y_key
+
+):
+
+    total = 0.0
+
+
+    point_ids = sorted(
+
+        set(
+
+            r["point_idx"]
+
+            for r in results
+
+        )
 
     )
+
+
+    for point_idx in point_ids:
+
+        rows = [
+
+            r
+
+            for r in results
+
+            if r["point_idx"]
+            ==
+            point_idx
+
+        ]
+
+
+        if len(rows) < 2:
+
+            continue
+
+
+        x = np.array(
+
+            [
+                r[x_key]
+                for r in rows
+            ],
+
+            dtype=float
+
+        )
+
+
+        y = np.array(
+
+            [
+                r[y_key]
+                for r in rows
+            ],
+
+            dtype=float
+
+        )
+
+
+        dx = np.diff(x)
+
+        dy = np.diff(y)
+
+
+        total += float(
+
+            np.sum(
+
+                np.sqrt(
+
+                    dx ** 2
+                    +
+                    dy ** 2
+
+                )
+
+            )
+
+        )
+
+
+    return total
 
 
 # ============================================================
 # PRINT
 # ============================================================
 
-print()
+def print_method(
 
-print("=" * 110)
+    name,
 
-print(
-    "GAZE ACCURACY + JITTER COMPARISON"
-)
+    results,
 
-print("=" * 110)
+    x_key,
 
-print()
+    y_key
 
-print(
+):
 
-    f"{'Method':<20}"
+    metrics = calculate_metrics(
 
-    f"{'MAE (px)':>14}"
+        results,
 
-    f"{'RMSE (px)':>14}"
+        x_key,
 
-    f"{'Jitter (px)':>16}"
+        y_key
 
-    f"{'Jitter Std':>16}"
-
-    f"{'Max Jitter':>16}"
-
-    f"{'Total Var.':>16}"
-
-)
-
-print(
-    "-" * 110
-)
+    )
 
 
-for method_name in METHODS:
+    jitter = calculate_jitter(
 
-    r = results[
-        method_name
-    ]
+        results,
 
+        x_key,
+
+        y_key
+
+    )
+
+
+    variation = calculate_total_variation(
+
+        results,
+
+        x_key,
+
+        y_key
+
+    )
+
+
+    print()
+
+    print(name)
 
     print(
 
-        f"{method_name:<20}"
+        f"  MAE:     "
+        f"{metrics['MAE']:.2f} px"
 
-        f"{r['MAE']:>14.2f}"
+    )
 
-        f"{r['RMSE']:>14.2f}"
+    print(
 
-        f"{r['Mean Jitter']:>16.2f}"
+        f"  RMSE:    "
+        f"{metrics['RMSE']:.2f} px"
 
-        f"{r['Jitter Std']:>16.2f}"
+    )
 
-        f"{r['Maximum Jitter']:>16.2f}"
+    print(
 
-        f"{r['Total Variation']:>16.2f}"
+        f"  Median:  "
+        f"{metrics['Median']:.2f} px"
+
+    )
+
+    print(
+
+        f"  P95:     "
+        f"{metrics['P95']:.2f} px"
+
+    )
+
+    print(
+
+        f"  Jitter:  "
+        f"{jitter:.2f} px/frame"
+
+    )
+
+    print(
+
+        f"  Total variation: "
+        f"{variation:.2f} px"
 
     )
 
 
 # ============================================================
-# IMPROVEMENT
+# SAVE
 # ============================================================
 
-baseline_mae = results[
-    "Baseline"
-]["MAE"]
+def save_results(
 
-baseline_jitter = results[
-    "Baseline"
-]["Mean Jitter"]
+    results,
 
+    filename
 
-print()
+):
 
-print("=" * 90)
+    fields = [
 
-print(
-    "IMPROVEMENT OVER BASELINE"
-)
+        "point_idx",
 
-print("=" * 90)
+        "target_x",
+        "target_y",
 
+        "baseline_x",
+        "baseline_y",
 
-for method_name in [
+        "ridge_x",
+        "ridge_y",
 
-    "Method 2",
+        "fixed_kf_x",
+        "fixed_kf_y",
 
-    "Fixed KF",
+        "adaptive_q_x",
+        "adaptive_q_y",
 
-    "Adaptive Q",
+        "adaptive_r_x",
+        "adaptive_r_y",
 
-    "Adaptive R",
+        "adaptive_qr_x",
+        "adaptive_qr_y",
 
-    "Proposed"
+        "confidence"
 
-]:
-
-    method_mae = results[
-        method_name
-    ]["MAE"]
-
-
-    method_jitter = results[
-        method_name
-    ]["Mean Jitter"]
+    ]
 
 
-    mae_reduction = (
+    with open(
 
-        (
-            baseline_mae
-            -
-            method_mae
+        filename,
+
+        "w",
+
+        newline=""
+
+    ) as f:
+
+        writer = csv.DictWriter(
+
+            f,
+
+            fieldnames=fields
+
         )
 
-        /
+        writer.writeheader()
 
-        baseline_mae
-
-    ) * 100
+        writer.writerows(results)
 
 
-    jitter_reduction = (
+# ============================================================
+# MAIN
+# ============================================================
 
-        (
-            baseline_jitter
-            -
-            method_jitter
+def main():
+
+    print()
+
+    print("=" * 80)
+
+    print(
+        "FINAL GAZE EVALUATION"
+    )
+
+    print("=" * 80)
+
+    print()
+
+
+    # ========================================================
+    # CALIBRATION
+    # ========================================================
+
+    calibration_raw = load_csv(
+
+        CALIBRATION_FILE
+
+    )
+
+
+    calibration_rows = valid_rows(
+
+        calibration_raw
+
+    )
+
+
+    print(
+
+        f"Calibration samples: "
+        f"{len(calibration_rows)}"
+
+    )
+
+
+    if len(calibration_rows) == 0:
+
+        raise ValueError(
+            "No valid calibration samples."
         )
 
-        /
 
-        baseline_jitter
+    # ========================================================
+    # FIT RIDGE
+    # ========================================================
 
-    ) * 100
+    print()
+
+    print(
+        "Fitting Ridge on CALIBRATION data only..."
+    )
+
+
+    (
+        baseline_mapper,
+        method2_mapper
+
+    ) = fit_mappers(
+
+        calibration_rows
+
+    )
+
+
+    print(
+        "Ridge fitting complete."
+    )
+
+
+    # ========================================================
+    # EVALUATION DATA
+    # ========================================================
+
+    evaluation_raw = load_csv(
+
+        EVALUATION_FILE
+
+    )
+
+
+    evaluation_rows = valid_rows(
+
+        evaluation_raw
+
+    )
 
 
     print()
 
     print(
-        method_name
+
+        f"Evaluation samples: "
+        f"{len(evaluation_rows)}"
+
     )
+
+
+    if len(evaluation_rows) == 0:
+
+        raise ValueError(
+            "No valid evaluation samples."
+        )
+
+
+    # ========================================================
+    # EVALUATE
+    # ========================================================
+
+    results = evaluate(
+
+        evaluation_rows,
+
+        baseline_mapper,
+
+        method2_mapper
+
+    )
+
+
+    # ========================================================
+    # RESULTS
+    # ========================================================
+
+    print()
+
+    print("=" * 80)
+
+    print(
+        "EVALUATION RESULTS"
+    )
+
+    print("=" * 80)
+
+
+    print_method(
+
+        "Baseline: L2CS + Ridge (gaze only)",
+
+        results,
+
+        "baseline_x",
+
+        "baseline_y"
+
+    )
+
+
+    print_method(
+
+        "Method 2: L2CS + Head Pose + Ridge",
+
+        results,
+
+        "ridge_x",
+
+        "ridge_y"
+
+    )
+
+
+    print_method(
+
+        "Fixed Kalman",
+
+        results,
+
+        "fixed_kf_x",
+
+        "fixed_kf_y"
+
+    )
+
+
+    print_method(
+
+        "Adaptive Q Kalman",
+
+        results,
+
+        "adaptive_q_x",
+
+        "adaptive_q_y"
+
+    )
+
+
+    print_method(
+
+        "Adaptive R Kalman",
+
+        results,
+
+        "adaptive_r_x",
+
+        "adaptive_r_y"
+
+    )
+
+
+    print_method(
+
+        "Proposed: Adaptive Q + R",
+
+        results,
+
+        "adaptive_qr_x",
+
+        "adaptive_qr_y"
+
+    )
+
+
+    # ========================================================
+    # SAVE
+    # ========================================================
+
+    output_file = os.path.join(
+
+        os.path.dirname(
+            EVALUATION_FILE
+        ),
+
+        "final_evaluation_results.csv"
+
+    )
+
+
+    save_results(
+
+        results,
+
+        output_file
+
+    )
+
+
+    print()
 
     print(
 
-        f"  MAE reduction    : "
-        f"{mae_reduction:.2f}%"
+        f"Results saved to: "
+        f"{output_file}"
 
+    )
+
+    print()
+
+    print("=" * 80)
+
+    print("PIPELINE")
+
+    print("=" * 80)
+
+    print()
+
+    print(
+        "Baseline:"
     )
 
     print(
-
-        f"  Jitter reduction : "
-        f"{jitter_reduction:.2f}%"
-
+        "L2CS -> Ridge(gaze only) -> screen"
     )
 
+    print()
 
-# ============================================================
-# SAVE SUMMARY
-# ============================================================
+    print(
+        "Method 2:"
+    )
 
-summary_rows = []
+    print(
+        "L2CS + Head Pose -> Ridge -> screen"
+    )
 
+    print()
 
-for method_name in METHODS:
+    print(
+        "Fixed KF:"
+    )
 
-    r = results[
-        method_name
-    ]
+    print(
+        "Method 2 Ridge -> Fixed KF -> screen"
+    )
 
+    print()
 
-    summary_rows.append({
+    print(
+        "Adaptive Q:"
+    )
 
-        "Method": method_name,
+    print(
+        "Method 2 Ridge -> Adaptive Q KF -> screen"
+    )
 
-        "MAE_px": r["MAE"],
+    print()
 
-        "RMSE_px": r["RMSE"],
+    print(
+        "Adaptive R:"
+    )
 
-        "Mean_Jitter_px":
-            r["Mean Jitter"],
+    print(
+        "Method 2 Ridge -> Adaptive R KF -> screen"
+    )
 
-        "Jitter_Std_px":
-            r["Jitter Std"],
+    print()
 
-        "Maximum_Jitter_px":
-            r["Maximum Jitter"],
+    print(
+        "Proposed:"
+    )
 
-        "Total_Variation_px":
-            r["Total Variation"]
+    print(
+        "Method 2 Ridge -> Adaptive Q+R KF -> screen"
+    )
 
-    })
-
-
-summary_df = pd.DataFrame(
-    summary_rows
-)
-
-
-# ============================================================
-# OUTPUT PATH
-# ============================================================
-
-directory = os.path.dirname(
-    INPUT_FILE
-)
-
-if directory == "":
-    directory = "."
+    print()
 
 
-summary_file = os.path.join(
+if __name__ == "__main__":
 
-    directory,
-
-    "final_evaluation_summary.csv"
-
-)
-
-
-summary_df.to_csv(
-
-    summary_file,
-
-    index=False
-
-)
-
-
-print()
-
-print("=" * 90)
-
-print(
-    "Summary saved to:"
-)
-
-print(
-    summary_file
-)
-
-print("=" * 90)
+    main()

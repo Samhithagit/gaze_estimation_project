@@ -4,19 +4,11 @@ import time
 import csv
 import os
 import sys
+import random
 
 from module1.eye_processing import get_face
 from module2.gaze_estimation import GazeEstimator
-
 from module3.head_pose import estimate_head_pose
-from module3.head_eye_fusion import HeadEyeFusion
-
-from module3.gaze_kalman import (
-    FixedKalmanGaze,
-    AdaptiveQKalmanGaze,
-    AdaptiveRKalmanGaze,
-    AdaptiveQRKalmanGaze,   # NEW: combined adaptive filter -- your actual "Proposed" method
-)
 
 
 # ============================================================
@@ -31,34 +23,16 @@ FIXATION_SECONDS = 5.0
 
 DISCARD_FRACTION = 0.40
 
-# FIX: was 224 -- this silently overrode the 448 fix made in
-# gaze_estimation.py / eye_processing.py, meaning every method
-# in the last trial run (including baseline) was evaluated on
-# the WRONG input resolution. Must match GazeEstimator's
-# transforms.Resize((448, 448)).
 FACE_SIZE = 448
 
 
 # ============================================================
-# OUTPUT
+# TRIAL
 # ============================================================
 
-# Run:
-#
-# python phase2_calibration.py trial_01
-#
-# or:
-#
-# python phase2_calibration.py trial_02
-#
-# etc.
-
 if len(sys.argv) >= 2:
-
     TRIAL_NAME = sys.argv[1]
-
 else:
-
     TRIAL_NAME = "trial_01"
 
 
@@ -73,56 +47,15 @@ os.makedirs(
 )
 
 
-OUTPUT_FILE = os.path.join(
+CALIBRATION_FILE = os.path.join(
     TRIAL_DIR,
-    "unified_evaluation.csv"
+    "calibration_data.csv"
 )
 
-
-# ============================================================
-# FUSION
-# ============================================================
-
-FUSION_GAZE_WEIGHT = 1.0
-FUSION_HEAD_WEIGHT = 1.0
-
-FUSION_YAW_SIGN = 1.0
-FUSION_PITCH_SIGN = 1.0
-
-
-# ============================================================
-# FIXED KALMAN
-# ============================================================
-
-KALMAN_PROCESS_NOISE = 0.01
-
-KALMAN_MEASUREMENT_NOISE = 1.0
-
-KALMAN_INITIAL_UNCERTAINTY = 1.0
-
-
-# ============================================================
-# ADAPTIVE Q
-# ============================================================
-
-ADAPTIVE_Q_MIN = 0.001
-
-ADAPTIVE_Q_MAX = 0.20
-
-ADAPTIVE_Q_RATE = 0.10
-
-
-# ============================================================
-# ADAPTIVE R
-# ============================================================
-
-ADAPTIVE_R_MIN = 0.10
-
-ADAPTIVE_R_MAX = 10.0
-
-# NOTE: ADAPTIVE_R_RATE removed -- the fixed AdaptiveRKalmanGaze
-# no longer takes an innovation-based adaptation_rate; R is now
-# derived directly from model confidence via r_min/r_max only.
+EVALUATION_FILE = os.path.join(
+    TRIAL_DIR,
+    "evaluation_data.csv"
+)
 
 
 # ============================================================
@@ -130,6 +63,10 @@ ADAPTIVE_R_MAX = 10.0
 # ============================================================
 
 def get_screen_size():
+
+    # --------------------------------------------------------
+    # Method 1: tkinter
+    # --------------------------------------------------------
 
     try:
 
@@ -140,19 +77,20 @@ def get_screen_size():
         root.withdraw()
 
         width = root.winfo_screenwidth()
-
         height = root.winfo_screenheight()
 
         root.destroy()
 
         if width > 0 and height > 0:
-
             return width, height
 
     except Exception:
-
         pass
 
+
+    # --------------------------------------------------------
+    # Method 2: screeninfo
+    # --------------------------------------------------------
 
     try:
 
@@ -161,22 +99,24 @@ def get_screen_size():
         monitors = get_monitors()
 
         primary = next(
+
             (
                 m
                 for m in monitors
+
                 if getattr(
                     m,
                     "is_primary",
                     False
                 )
             ),
+
             monitors[0]
         )
 
         return primary.width, primary.height
 
     except Exception:
-
         pass
 
 
@@ -211,21 +151,48 @@ MARGIN_Y = int(
 
 GRID_POINTS = [
 
-    (MARGIN_X, MARGIN_Y),
+    # Top row
+    (
+        MARGIN_X,
+        MARGIN_Y
+    ),
 
-    (SCREEN_W // 2, MARGIN_Y),
+    (
+        SCREEN_W // 2,
+        MARGIN_Y
+    ),
 
-    (SCREEN_W - MARGIN_X, MARGIN_Y),
+    (
+        SCREEN_W - MARGIN_X,
+        MARGIN_Y
+    ),
 
-    (MARGIN_X, SCREEN_H // 2),
+    # Middle row
+    (
+        MARGIN_X,
+        SCREEN_H // 2
+    ),
 
-    (SCREEN_W // 2, SCREEN_H // 2),
+    (
+        SCREEN_W // 2,
+        SCREEN_H // 2
+    ),
 
-    (SCREEN_W - MARGIN_X, SCREEN_H // 2),
+    (
+        SCREEN_W - MARGIN_X,
+        SCREEN_H // 2
+    ),
 
-    (MARGIN_X, SCREEN_H - MARGIN_Y),
+    # Bottom row
+    (
+        MARGIN_X,
+        SCREEN_H - MARGIN_Y
+    ),
 
-    (SCREEN_W // 2, SCREEN_H - MARGIN_Y),
+    (
+        SCREEN_W // 2,
+        SCREEN_H - MARGIN_Y
+    ),
 
     (
         SCREEN_W - MARGIN_X,
@@ -235,277 +202,156 @@ GRID_POINTS = [
 
 
 # ============================================================
-# MAIN
+# CSV HEADER
 # ============================================================
 
-def main():
+CSV_HEADER = [
 
-    print()
-    print("=" * 80)
-    print("UNIFIED GAZE EVALUATION")
-    print("=" * 80)
+    "frame",
 
-    print()
+    "timestamp",
 
-    print(f"TRIAL: {TRIAL_NAME}")
+    "point_idx",
 
-    print()
+    "target_x",
 
-    print(
-        "ALL SIX METHODS USE THE SAME WEBCAM FRAMES."
-    )
+    "target_y",
 
-    print()
+    "raw_gaze_yaw",
 
-    print(
-        "1. Baseline   : Raw gaze"
-    )
+    "raw_gaze_pitch",
 
-    print(
-        "2. Method 2   : Raw + Head-Eye Fusion"
-    )
+    "raw_confidence",
 
-    print(
-        "3. Fixed KF   : Fusion + Fixed Kalman"
-    )
+    "head_yaw",
 
-    print(
-        "4. Adaptive Q : Fusion + Adaptive-Q Kalman"
-    )
+    "head_pitch",
 
-    print(
-        "5. Adaptive R : Fusion + Adaptive-R Kalman (confidence-based)"
-    )
+    "head_roll",
 
-    print(
-        "6. Proposed   : Fusion + Adaptive Q+R Kalman (AKF)"
-    )
+    "head_reprojection_error"
 
-    print()
-
-    print(
-        f"Output: {OUTPUT_FILE}"
-    )
-
-    print()
-
-    print(
-        "Press ESC to stop."
-    )
-
-    print()
+]
 
 
-    # ========================================================
-    # MODELS
-    # ========================================================
+# ============================================================
+# CREATE WINDOW
+# ============================================================
 
-    estimator = GazeEstimator(
-        MODEL_PATH,
-        device="cpu"
-    )
+def create_window():
 
+    window = "Gaze Calibration"
 
-    fusion = HeadEyeFusion(
-
-        gaze_weight=FUSION_GAZE_WEIGHT,
-
-        head_weight=FUSION_HEAD_WEIGHT,
-
-        yaw_sign=FUSION_YAW_SIGN,
-
-        pitch_sign=FUSION_PITCH_SIGN
-    )
-
-
-    # ========================================================
-    # CAMERA
-    # ========================================================
-
-    cap = cv2.VideoCapture(
-        CAMERA_ID
-    )
-
-
-    if not cap.isOpened():
-
-        print(
-            "ERROR: Could not open webcam."
-        )
-
-        return
-
-
-    # ========================================================
-    # WINDOW
-    # ========================================================
-
-    window = "Unified Gaze Evaluation"
+    # IMPORTANT:
+    # This is kept exactly like your original working code.
 
     cv2.namedWindow(
+
         window,
+
         cv2.WND_PROP_FULLSCREEN
+
     )
 
     cv2.setWindowProperty(
+
         window,
+
         cv2.WND_PROP_FULLSCREEN,
+
         cv2.WINDOW_FULLSCREEN
+
     )
 
+    return window
 
-    # ========================================================
+
+# ============================================================
+# COLLECT ONE DATASET
+# ============================================================
+
+def collect_dataset(
+    estimator,
+    cap,
+    window,
+    output_file,
+    points,
+    dataset_name
+):
+
+    print()
+    print("=" * 80)
+    print(f"{dataset_name.upper()} DATA COLLECTION")
+    print("=" * 80)
+    print()
+
+    print(
+        f"Output: {output_file}"
+    )
+
+    print()
+
+    # --------------------------------------------------------
     # CSV
-    # ========================================================
+    # --------------------------------------------------------
 
     csv_file = open(
-        OUTPUT_FILE,
+
+        output_file,
+
         "w",
+
         newline=""
+
     )
 
     writer = csv.writer(
         csv_file
     )
 
-
-    writer.writerow([
-
-        "frame",
-        "timestamp",
-
-        "point_idx",
-
-        "target_x",
-        "target_y",
-
-        # Baseline
-        "raw_gaze_yaw",
-        "raw_gaze_pitch",
-        "raw_confidence",
-
-        # Head
-        "head_yaw",
-        "head_pitch",
-        "head_roll",
-        "head_reprojection_error",
-
-        # Method 2
-        "fused_yaw",
-        "fused_pitch",
-
-        # Fixed Kalman
-        "kalman_yaw",
-        "kalman_pitch",
-
-        # Adaptive Q
-        "adaptive_q_yaw",
-        "adaptive_q_pitch",
-
-        # Adaptive R
-        "adaptive_r_yaw",
-        "adaptive_r_pitch",
-
-        # Adaptive Q+R (Proposed)
-        "adaptive_qr_yaw",
-        "adaptive_qr_pitch"
-
-    ])
+    writer.writerow(
+        CSV_HEADER
+    )
 
 
-    # ========================================================
-    # RECORDING
-    # ========================================================
+    # --------------------------------------------------------
+    # Recording
+    # --------------------------------------------------------
 
     frame_number = 0
 
-    experiment_start = time.perf_counter()
+    experiment_start = (
+        time.perf_counter()
+    )
 
+
+    # ========================================================
+    # TARGET LOOP
+    # ========================================================
 
     for point_idx, (
+
         target_x,
+
         target_y
-    ) in enumerate(GRID_POINTS):
+
+    ) in enumerate(points):
 
 
         print(
+
             f"Point "
             f"{point_idx + 1}/"
-            f"{len(GRID_POINTS)} "
+            f"{len(points)} "
             f"-> "
             f"({target_x}, {target_y})"
+
         )
 
 
-        # ----------------------------------------------------
-        # NEW FILTERS FOR EACH FIXATION
-        # ----------------------------------------------------
-
-        kalman = FixedKalmanGaze(
-
-            process_noise=KALMAN_PROCESS_NOISE,
-
-            measurement_noise=KALMAN_MEASUREMENT_NOISE,
-
-            initial_uncertainty=KALMAN_INITIAL_UNCERTAINTY
+        point_start = (
+            time.perf_counter()
         )
-
-
-        adaptive_q = AdaptiveQKalmanGaze(
-
-            process_noise=KALMAN_PROCESS_NOISE,
-
-            measurement_noise=KALMAN_MEASUREMENT_NOISE,
-
-            initial_uncertainty=KALMAN_INITIAL_UNCERTAINTY,
-
-            q_min=ADAPTIVE_Q_MIN,
-
-            q_max=ADAPTIVE_Q_MAX,
-
-            adaptation_rate=ADAPTIVE_Q_RATE
-        )
-
-
-        adaptive_r = AdaptiveRKalmanGaze(
-
-            process_noise=KALMAN_PROCESS_NOISE,
-
-            measurement_noise=KALMAN_MEASUREMENT_NOISE,
-
-            initial_uncertainty=KALMAN_INITIAL_UNCERTAINTY,
-
-            r_min=ADAPTIVE_R_MIN,
-
-            r_max=ADAPTIVE_R_MAX
-        )
-
-
-        adaptive_qr = AdaptiveQRKalmanGaze(
-
-    process_noise=KALMAN_PROCESS_NOISE,
-
-    measurement_noise=KALMAN_MEASUREMENT_NOISE,
-
-    initial_uncertainty=KALMAN_INITIAL_UNCERTAINTY,
-
-    q_min=ADAPTIVE_Q_MIN,
-
-    q_max=ADAPTIVE_Q_MAX,
-
-    q_adaptation_rate=ADAPTIVE_Q_RATE,
-
-    r_min=ADAPTIVE_R_MIN,
-
-    r_max=ADAPTIVE_R_MAX,
-
-    confidence_alpha=0.20,
-
-    innovation_alpha=0.20
-)
-
-
-        point_start = time.perf_counter()
 
         point_samples = []
 
@@ -527,11 +373,14 @@ def main():
         ):
 
 
+            # ------------------------------------------------
+            # READ FRAME
+            # ------------------------------------------------
+
             ret, frame = cap.read()
 
 
             if not ret:
-
                 continue
 
 
@@ -539,26 +388,34 @@ def main():
 
 
             # ------------------------------------------------
-            # MIRROR
+            # MIRROR FRAME
             # ------------------------------------------------
 
             frame = cv2.flip(
+
                 frame,
+
                 1
+
             )
 
+
+            # ------------------------------------------------
+            # TIMESTAMP
+            # ------------------------------------------------
 
             timestamp = (
 
                 time.perf_counter()
                 -
                 experiment_start
+
             )
 
 
-            # ------------------------------------------------
-            # TARGET
-            # ------------------------------------------------
+            # =================================================
+            # DISPLAY TARGET
+            # =================================================
 
             canvas = np.zeros(
 
@@ -569,8 +426,13 @@ def main():
                 ),
 
                 dtype=np.uint8
+
             )
 
+
+            # -------------------------------------------------
+            # Target circle
+            # -------------------------------------------------
 
             cv2.circle(
 
@@ -586,6 +448,7 @@ def main():
                 (0, 0, 255),
 
                 -1
+
             )
 
 
@@ -603,8 +466,13 @@ def main():
                 (255, 255, 255),
 
                 2
+
             )
 
+
+            # -------------------------------------------------
+            # Point number
+            # -------------------------------------------------
 
             cv2.putText(
 
@@ -613,7 +481,7 @@ def main():
                 (
                     f"Point "
                     f"{point_idx + 1}/"
-                    f"{len(GRID_POINTS)}"
+                    f"{len(points)}"
                 ),
 
                 (30, 40),
@@ -625,14 +493,22 @@ def main():
                 (255, 255, 255),
 
                 2
+
             )
 
 
             cv2.imshow(
+
                 window,
+
                 canvas
+
             )
 
+
+            # ------------------------------------------------
+            # ESC
+            # ------------------------------------------------
 
             if cv2.waitKey(1) & 0xFF == 27:
 
@@ -642,40 +518,42 @@ def main():
 
                 cv2.destroyAllWindows()
 
-                return
+                return False
 
 
-            # ------------------------------------------------
+            # =================================================
             # HEAD POSE
-            # ------------------------------------------------
+            # =================================================
 
             head_pose = estimate_head_pose(
+
                 frame
+
             )
 
 
-            # ------------------------------------------------
+            # =================================================
             # FACE
-            # ------------------------------------------------
+            # =================================================
 
             _, face_crop = get_face(
 
                 frame,
 
                 FACE_SIZE
+
             )
 
 
-            # ------------------------------------------------
-            # DEFAULTS
-            # ------------------------------------------------
+            # =================================================
+            # DEFAULT VALUES
+            # =================================================
 
             raw_yaw = None
 
             raw_pitch = None
 
-            confidence = 0.0
-
+            confidence = None
 
             head_yaw = None
 
@@ -686,52 +564,57 @@ def main():
             reprojection_error = None
 
 
-            fused_yaw = None
-
-            fused_pitch = None
-
-
-            kalman_yaw = None
-
-            kalman_pitch = None
-
-
-            adaptive_q_yaw = None
-
-            adaptive_q_pitch = None
-
-
-            adaptive_r_yaw = None
-
-            adaptive_r_pitch = None
-
-
-            adaptive_qr_yaw = None
-
-            adaptive_qr_pitch = None
-
-
             # =================================================
-            # HEAD
+            # HEAD POSE
             # =================================================
 
             if head_pose is not None:
 
-                head_yaw = float(
-                    head_pose["yaw"]
-                )
+                try:
 
-                head_pitch = float(
-                    head_pose["pitch"]
-                )
+                    head_yaw = float(
 
-                head_roll = float(
-                    head_pose["roll"]
-                )
+                        head_pose["yaw"]
 
-                reprojection_error = float(
-                    head_pose["reprojection_error"]
-                )
+                    )
+
+                    head_pitch = float(
+
+                        head_pose["pitch"]
+
+                    )
+
+                    head_roll = float(
+
+                        head_pose["roll"]
+
+                    )
+
+                    reprojection_error = float(
+
+                        head_pose[
+                            "reprojection_error"
+                        ]
+
+                    )
+
+                except (
+
+                    KeyError,
+
+                    TypeError,
+
+                    ValueError
+
+                ):
+
+                    head_yaw = None
+
+                    head_pitch = None
+
+                    head_roll = None
+
+                    reprojection_error = None
 
 
             # =================================================
@@ -740,17 +623,51 @@ def main():
 
             if face_crop is not None:
 
-                (
-                    raw_yaw,
-                    raw_pitch,
-                    confidence
-                ) = estimator.predict_gaze(
-                    face_crop
-                )
+                try:
+
+                    (
+
+                        raw_yaw,
+
+                        raw_pitch,
+
+                        confidence
+
+                    ) = estimator.predict_gaze(
+
+                        face_crop
+
+                    )
+
+                    if raw_yaw is not None:
+
+                        raw_yaw = float(
+                            raw_yaw
+                        )
+
+                    if raw_pitch is not None:
+
+                        raw_pitch = float(
+                            raw_pitch
+                        )
+
+                    if confidence is not None:
+
+                        confidence = float(
+                            confidence
+                        )
+
+                except Exception:
+
+                    raw_yaw = None
+
+                    raw_pitch = None
+
+                    confidence = None
 
 
             # =================================================
-            # HEAD-EYE FUSION
+            # VALID SAMPLE
             # =================================================
 
             if (
@@ -763,119 +680,9 @@ def main():
 
                 and head_pitch is not None
 
-            ):
+                and head_roll is not None
 
-                fused_result = fusion.fuse(
-
-                    gaze_yaw=raw_yaw,
-
-                    gaze_pitch=raw_pitch,
-
-                    head_yaw=head_yaw,
-
-                    head_pitch=head_pitch
-                )
-
-
-                if fused_result is not None:
-
-                    fused_yaw = float(
-                        fused_result["yaw"]
-                    )
-
-                    fused_pitch = float(
-                        fused_result["pitch"]
-                    )
-
-
-            # =================================================
-            # KALMAN FAMILY -- all four share the same fused
-            # measurement; AdaptiveR and AdaptiveQR additionally
-            # receive `confidence` from the raw gaze estimate,
-            # which is what makes their R adaptation meaningful.
-            # =================================================
-
-            if (
-
-                fused_yaw is not None
-
-                and fused_pitch is not None
-
-            ):
-
-                result = kalman.update(
-                    fused_yaw,
-                    fused_pitch
-                )
-
-                if result is not None:
-                    kalman_yaw = float(result["yaw"])
-                    kalman_pitch = float(result["pitch"])
-
-
-                result_q = adaptive_q.update(
-                    fused_yaw,
-                    fused_pitch
-                )
-
-                if result_q is not None:
-                    adaptive_q_yaw = float(result_q["yaw"])
-                    adaptive_q_pitch = float(result_q["pitch"])
-
-
-                result_r = adaptive_r.update(
-                    fused_yaw,
-                    fused_pitch,
-                    confidence=confidence   # FIX: now wired through
-                )
-
-                if result_r is not None:
-                    adaptive_r_yaw = float(result_r["yaw"])
-                    adaptive_r_pitch = float(result_r["pitch"])
-
-
-                result_qr = adaptive_qr.update(
-                    fused_yaw,
-                    fused_pitch,
-                    confidence=confidence
-                )
-
-                if result_qr is not None:
-                    adaptive_qr_yaw = float(result_qr["yaw"])
-                    adaptive_qr_pitch = float(result_qr["pitch"])
-
-
-            # =================================================
-            # FAIR SAMPLE -- require every method to have produced
-            # a result this frame so all six columns are directly
-            # comparable row-for-row
-            # =================================================
-
-            if (
-
-                raw_yaw is not None
-
-                and raw_pitch is not None
-
-                and fused_yaw is not None
-
-                and fused_pitch is not None
-
-                and kalman_yaw is not None
-
-                and kalman_pitch is not None
-
-                and adaptive_q_yaw is not None
-
-                and adaptive_q_pitch is not None
-
-                and adaptive_r_yaw is not None
-
-                and adaptive_r_pitch is not None
-
-                and adaptive_qr_yaw is not None
-
-                and adaptive_qr_pitch is not None
+                and confidence is not None
 
             ):
 
@@ -903,33 +710,13 @@ def main():
 
                     head_roll,
 
-                    reprojection_error,
-
-                    fused_yaw,
-
-                    fused_pitch,
-
-                    kalman_yaw,
-
-                    kalman_pitch,
-
-                    adaptive_q_yaw,
-
-                    adaptive_q_pitch,
-
-                    adaptive_r_yaw,
-
-                    adaptive_r_pitch,
-
-                    adaptive_qr_yaw,
-
-                    adaptive_qr_pitch
+                    reprojection_error
 
                 ])
 
 
         # ====================================================
-        # DISCARD SETTLING
+        # DISCARD INITIAL SETTLING PERIOD
         # ====================================================
 
         n_discard = int(
@@ -937,16 +724,19 @@ def main():
             len(point_samples)
             *
             DISCARD_FRACTION
+
         )
 
 
         kept_samples = point_samples[
+
             n_discard:
+
         ]
 
 
         # ====================================================
-        # WRITE
+        # WRITE SAMPLES
         # ====================================================
 
         for row in kept_samples:
@@ -961,9 +751,210 @@ def main():
 
             f"   Collected: "
             f"{len(point_samples)}"
+            f" | Discarded: "
+            f"{n_discard}"
             f" | Kept: "
             f"{len(kept_samples)}"
+
         )
+
+
+    csv_file.close()
+
+    return True
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+
+    print()
+    print("=" * 80)
+    print("GAZE CALIBRATION + EVALUATION DATA COLLECTION")
+    print("=" * 80)
+    print()
+
+    print(
+        f"TRIAL: {TRIAL_NAME}"
+    )
+
+    print()
+
+    print(
+        "Two separate datasets will be collected:"
+    )
+
+    print(
+        "  1. Calibration data"
+    )
+
+    print(
+        "  2. Evaluation data"
+    )
+
+    print()
+
+    print(
+        "Ridge regression and Kalman filtering"
+    )
+
+    print(
+        "are performed later in final_evaluation.py."
+    )
+
+    print()
+
+    print(
+        "Press ESC to stop."
+    )
+
+    print()
+
+
+    # ========================================================
+    # GAZE MODEL
+    # ========================================================
+
+    print("Loading gaze model...")
+
+    estimator = GazeEstimator(
+
+        MODEL_PATH,
+
+        device="cpu"
+
+    )
+
+    print("Gaze model loaded.")
+
+
+    # ========================================================
+    # CAMERA
+    # ========================================================
+
+    print("Opening webcam...")
+
+    cap = cv2.VideoCapture(
+
+        CAMERA_ID
+
+    )
+
+
+    if not cap.isOpened():
+
+        print(
+            "ERROR: Could not open webcam."
+        )
+
+        return
+
+
+    print("Webcam opened.")
+
+
+    # ========================================================
+    # WINDOW
+    # ========================================================
+
+    print("Opening calibration window...")
+
+    window = create_window()
+
+    print("Calibration window opened.")
+
+
+    # ========================================================
+    # CALIBRATION
+    # ========================================================
+
+    calibration_points = list(
+        GRID_POINTS
+    )
+
+
+    success = collect_dataset(
+
+        estimator,
+
+        cap,
+
+        window,
+
+        CALIBRATION_FILE,
+
+        calibration_points,
+
+        "Calibration"
+
+    )
+
+
+    if not success:
+        return
+
+
+    # ========================================================
+    # SHORT BREAK
+    # ========================================================
+
+    print()
+    print("Calibration complete.")
+    print()
+    print("Take a short break.")
+    print()
+    time.sleep(5)
+
+
+    # ========================================================
+    # EVALUATION
+    # ========================================================
+
+    # Randomize the order so the evaluation does not always
+    # follow the same 1 -> 9 sequence.
+
+    evaluation_points = list(
+        GRID_POINTS
+    )
+
+    random.shuffle(
+        evaluation_points
+    )
+
+
+    print()
+    print("Evaluation point order:")
+
+    for i, point in enumerate(
+        evaluation_points
+    ):
+
+        print(
+            f"  {i + 1}: {point}"
+        )
+
+
+    success = collect_dataset(
+
+        estimator,
+
+        cap,
+
+        window,
+
+        EVALUATION_FILE,
+
+        evaluation_points,
+
+        "Evaluation"
+
+    )
+
+
+    if not success:
+        return
 
 
     # ========================================================
@@ -972,24 +963,61 @@ def main():
 
     cap.release()
 
-    csv_file.close()
-
     cv2.destroyAllWindows()
 
 
+    # ========================================================
+    # FINISHED
+    # ========================================================
+
     print()
     print("=" * 80)
-    print("RECORDING FINISHED")
+    print("DATA COLLECTION FINISHED")
     print("=" * 80)
-
     print()
 
     print(
-        f"Saved: {OUTPUT_FILE}"
+        f"Calibration data:"
+    )
+
+    print(
+        f"  {CALIBRATION_FILE}"
     )
 
     print()
 
+    print(
+        f"Evaluation data:"
+    )
+
+    print(
+        f"  {EVALUATION_FILE}"
+    )
+
+    print()
+
+    print(
+        "Next step:"
+    )
+
+    print(
+        "Run:"
+    )
+
+    print()
+
+    print(
+        "python final_evaluation.py "
+        f"{CALIBRATION_FILE} "
+        f"{EVALUATION_FILE}"
+    )
+
+    print()
+
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
 
 if __name__ == "__main__":
 

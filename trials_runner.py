@@ -40,7 +40,7 @@ if NUM_TRIALS <= 0:
 
 
 # ============================================================
-# CONFIGURATION
+# FILES
 # ============================================================
 
 PHASE2_SCRIPT = "phase2_calibration.py"
@@ -51,7 +51,7 @@ TRIAL_ROOT = "trials"
 
 
 # ============================================================
-# HEADER
+# START
 # ============================================================
 
 print()
@@ -72,59 +72,23 @@ print(
 
 print()
 
-print(
-    "Each trial evaluates:"
-)
-
-print(
-    "1. Baseline"
-)
-
-print(
-    "2. Head-Eye Fusion"
-)
-
-print(
-    "3. Fixed Kalman"
-)
-
-print(
-    "4. Adaptive Q"
-)
-
-print(
-    "5. Adaptive R"
-)
-
-print(
-    "6. Proposed (Adaptive Q+R)"
-)
-
-print()
-
-
-# ============================================================
-# CREATE ROOT
-# ============================================================
-
-os.makedirs(
-    TRIAL_ROOT,
-    exist_ok=True
-)
-
 
 # ============================================================
 # RUN TRIALS
 # ============================================================
 
 for trial_number in range(
+
     1,
+
     NUM_TRIALS + 1
+
 ):
 
-
     trial_name = (
+
         f"trial_{trial_number:02d}"
+
     )
 
 
@@ -150,10 +114,6 @@ for trial_number in range(
     print()
 
 
-    # --------------------------------------------------------
-    # Ask user to prepare
-    # --------------------------------------------------------
-
     input(
 
         f"Prepare for {trial_name}. "
@@ -162,9 +122,9 @@ for trial_number in range(
     )
 
 
-    # --------------------------------------------------------
-    # Run recording
-    # --------------------------------------------------------
+    # ========================================================
+    # COLLECT CALIBRATION + EVALUATION
+    # ========================================================
 
     result = subprocess.run([
 
@@ -185,25 +145,34 @@ for trial_number in range(
             f"ERROR during {trial_name}."
         )
 
-        print(
-            "Stopping experiment."
-        )
-
         sys.exit(1)
 
 
-    # --------------------------------------------------------
-    # Evaluate
-    # --------------------------------------------------------
+    # ========================================================
+    # FILES
+    # ========================================================
 
-    csv_file = os.path.join(
+    calibration_file = os.path.join(
 
         trial_directory,
 
-        "unified_evaluation.csv"
+        "calibration_data.csv"
 
     )
 
+
+    evaluation_file = os.path.join(
+
+        trial_directory,
+
+        "evaluation_data.csv"
+
+    )
+
+
+    # ========================================================
+    # FINAL EVALUATION
+    # ========================================================
 
     result = subprocess.run([
 
@@ -211,7 +180,9 @@ for trial_number in range(
 
         FINAL_SCRIPT,
 
-        csv_file
+        calibration_file,
+
+        evaluation_file
 
     ])
 
@@ -228,7 +199,7 @@ for trial_number in range(
 
 
 # ============================================================
-# LOAD ALL TRIAL RESULTS
+# COMBINE
 # ============================================================
 
 print()
@@ -247,6 +218,10 @@ print()
 all_results = []
 
 
+# ============================================================
+# LOAD EACH TRIAL
+# ============================================================
+
 for trial_number in range(
 
     1,
@@ -263,69 +238,367 @@ for trial_number in range(
     )
 
 
-    summary_file = os.path.join(
+    results_file = os.path.join(
 
         TRIAL_ROOT,
 
         trial_name,
 
-        "final_evaluation_summary.csv"
+        "final_evaluation_results.csv"
 
     )
 
 
     if not os.path.exists(
-        summary_file
+        results_file
     ):
 
         print(
 
-            f"WARNING: Missing results for "
-            f"{trial_name}"
+            f"WARNING: Missing "
+            f"{results_file}"
 
         )
 
         continue
 
 
-    trial_df = pd.read_csv(
-        summary_file
+    df = pd.read_csv(
+
+        results_file
+
     )
 
 
-    trial_df[
-        "Trial"
-    ] = trial_number
+    if len(df) == 0:
 
+        continue
 
-    all_results.append(
-        trial_df
-    )
-
-
-if len(all_results) == 0:
 
     print(
-        "ERROR: No trial results found."
+
+        f"Loaded {trial_name}: "
+        f"{len(df)} samples"
+
+    )
+
+
+    # ========================================================
+    # METHOD COLUMNS
+    # ========================================================
+
+    methods = {
+
+        "Baseline": (
+
+            "baseline_x",
+            "baseline_y"
+
+        ),
+
+        "Method 2": (
+
+            "ridge_x",
+            "ridge_y"
+
+        ),
+
+        "Fixed KF": (
+
+            "fixed_kf_x",
+            "fixed_kf_y"
+
+        ),
+
+        "Adaptive Q": (
+
+            "adaptive_q_x",
+            "adaptive_q_y"
+
+        ),
+
+        "Adaptive R": (
+
+            "adaptive_r_x",
+            "adaptive_r_y"
+
+        ),
+
+        "Proposed": (
+
+            "adaptive_qr_x",
+            "adaptive_qr_y"
+
+        )
+
+    }
+
+
+    # ========================================================
+    # METRICS
+    # ========================================================
+
+    for method, (
+
+        x_col,
+        y_col
+
+    ) in methods.items():
+
+
+        data = df[
+
+            [
+                x_col,
+                y_col,
+                "target_x",
+                "target_y",
+                "point_idx"
+
+            ]
+
+        ].dropna()
+
+
+        if len(data) == 0:
+
+            continue
+
+
+        # ----------------------------------------------------
+        # Position error
+        # ----------------------------------------------------
+
+        dx = (
+
+            data[x_col].values
+            -
+            data["target_x"].values
+
+        )
+
+
+        dy = (
+
+            data[y_col].values
+            -
+            data["target_y"].values
+
+        )
+
+
+        errors = np.sqrt(
+
+            dx ** 2
+            +
+            dy ** 2
+
+        )
+
+
+        mae = float(
+
+            np.mean(errors)
+
+        )
+
+
+        rmse = float(
+
+            np.sqrt(
+
+                np.mean(
+
+                    errors ** 2
+
+                )
+
+            )
+
+        )
+
+
+        # ----------------------------------------------------
+        # Jitter
+        # ----------------------------------------------------
+
+        jitter_values = []
+
+
+        for point_idx in sorted(
+
+            data["point_idx"].unique()
+
+        ):
+
+
+            point_data = data[
+
+                data["point_idx"]
+                ==
+                point_idx
+
+            ]
+
+
+            if len(point_data) < 2:
+
+                continue
+
+
+            x = point_data[
+                x_col
+            ].values
+
+
+            y = point_data[
+                y_col
+            ].values
+
+
+            dx_j = np.diff(x)
+
+            dy_j = np.diff(y)
+
+
+            movement = np.sqrt(
+
+                dx_j ** 2
+                +
+                dy_j ** 2
+
+            )
+
+
+            jitter_values.extend(
+
+                movement.tolist()
+
+            )
+
+
+        if len(jitter_values) > 0:
+
+            mean_jitter = float(
+
+                np.mean(
+                    jitter_values
+                )
+
+            )
+
+        else:
+
+            mean_jitter = 0.0
+
+
+        # ----------------------------------------------------
+        # Total variation
+        # ----------------------------------------------------
+
+        total_variation = 0.0
+
+
+        for point_idx in sorted(
+
+            data["point_idx"].unique()
+
+        ):
+
+
+            point_data = data[
+
+                data["point_idx"]
+                ==
+                point_idx
+
+            ]
+
+
+            if len(point_data) < 2:
+
+                continue
+
+
+            x = point_data[
+                x_col
+            ].values
+
+
+            y = point_data[
+                y_col
+            ].values
+
+
+            dx_tv = np.diff(x)
+
+            dy_tv = np.diff(y)
+
+
+            movement = np.sqrt(
+
+                dx_tv ** 2
+                +
+                dy_tv ** 2
+
+            )
+
+
+            total_variation += float(
+
+                np.sum(movement)
+
+            )
+
+
+        all_results.append({
+
+            "Trial":
+                trial_number,
+
+            "Method":
+                method,
+
+            "MAE_px":
+                mae,
+
+            "RMSE_px":
+                rmse,
+
+            "Mean_Jitter_px":
+                mean_jitter,
+
+            "Total_Variation_px":
+                total_variation
+
+        })
+
+
+# ============================================================
+# DATAFRAME
+# ============================================================
+
+combined_df = pd.DataFrame(
+
+    all_results
+
+)
+
+
+if len(combined_df) == 0:
+
+    print(
+        "ERROR: No results found."
     )
 
     sys.exit(1)
 
 
-combined_df = pd.concat(
-
-    all_results,
-
-    ignore_index=True
-
-)
-
-
 # ============================================================
-# SAVE RAW COMBINED RESULTS
+# SAVE RAW RESULTS
 # ============================================================
 
-combined_file = os.path.join(
+raw_file = os.path.join(
 
     TRIAL_ROOT,
 
@@ -336,7 +609,7 @@ combined_file = os.path.join(
 
 combined_df.to_csv(
 
-    combined_file,
+    raw_file,
 
     index=False
 
@@ -344,100 +617,96 @@ combined_df.to_csv(
 
 
 # ============================================================
-# METRICS
+# FINAL MEAN + SD
 # ============================================================
 
-metrics = [
+METHOD_ORDER = [
 
-    "MAE_px",
+    "Baseline",
 
-    "RMSE_px",
+    "Method 2",
 
-    "Mean_Jitter_px",
+    "Fixed KF",
 
-    "Jitter_Std_px",
+    "Adaptive Q",
 
-    "Maximum_Jitter_px",
+    "Adaptive R",
 
-    "Total_Variation_px"
+    "Proposed"
 
 ]
 
 
-# ============================================================
-# FINAL STATISTICS
-# ============================================================
-
-summary_rows = []
+summary = []
 
 
-for method in combined_df[
-    "Method"
-].unique():
+for method in METHOD_ORDER:
 
 
-    method_data = combined_df[
-        combined_df["Method"] == method
+    data = combined_df[
+
+        combined_df["Method"]
+        ==
+        method
+
     ]
 
 
-    row = {
+    if len(data) == 0:
 
-        "Method": method,
-
-        "Trials": len(method_data)
-
-    }
+        continue
 
 
-    for metric in metrics:
+    summary.append({
 
-        values = method_data[
-            metric
-        ].dropna().values
+        "Method":
+            method,
 
+        "Trials":
+            len(data),
 
-        if len(values) == 0:
+        "MAE_Mean":
+            data["MAE_px"].mean(),
 
-            row[
-                metric + "_Mean"
-            ] = np.nan
+        "MAE_SD":
+            data["MAE_px"].std(
+                ddof=1
+            ),
 
-            row[
-                metric + "_SD"
-            ] = np.nan
+        "RMSE_Mean":
+            data["RMSE_px"].mean(),
 
-        else:
+        "RMSE_SD":
+            data["RMSE_px"].std(
+                ddof=1
+            ),
 
-            row[
-                metric + "_Mean"
-            ] = float(
-                np.mean(values)
+        "Jitter_Mean":
+            data["Mean_Jitter_px"].mean(),
+
+        "Jitter_SD":
+            data["Mean_Jitter_px"].std(
+                ddof=1
+            ),
+
+        "TV_Mean":
+            data["Total_Variation_px"].mean(),
+
+        "TV_SD":
+            data["Total_Variation_px"].std(
+                ddof=1
             )
 
-
-            row[
-                metric + "_SD"
-            ] = float(
-                np.std(
-                    values,
-                    ddof=1
-                )
-            ) if len(values) > 1 else 0.0
-
-
-    summary_rows.append(
-        row
-    )
+    })
 
 
 final_df = pd.DataFrame(
-    summary_rows
+    summary
 )
 
 
 # ============================================================
-# FINAL SUMMARY FILE
+# SAVE
 # ============================================================
 
 final_file = os.path.join(
@@ -459,7 +728,7 @@ final_df.to_csv(
 
 
 # ============================================================
-# PRINT FINAL RESULTS
+# PRINT
 # ============================================================
 
 print()
@@ -475,123 +744,85 @@ print("=" * 120)
 print()
 
 print(
+
     f"{'Method':<20}"
     f"{'MAE':>20}"
     f"{'RMSE':>20}"
     f"{'Jitter':>20}"
     f"{'Total Variation':>22}"
+
 )
 
 print(
+
     "-" * 120
+
 )
 
 
-# Fixed, deliberate print order (rather than combined_df's
-# arbitrary unique() order) so the table always reads
-# Baseline -> Fusion -> Fixed KF -> Adaptive Q -> Adaptive R
-# -> Proposed, matching the paper's ablation narrative.
-
-METHOD_ORDER = [
-
-    "Baseline",
-
-    "Method 2",
-
-    "Fixed KF",
-
-    "Adaptive Q",
-
-    "Adaptive R",
-
-    "Proposed"
-
-]
-
-
-for method in METHOD_ORDER:
-
-    matching_rows = final_df[
-        final_df["Method"] == method
-    ]
-
-    if len(matching_rows) == 0:
-        continue
-
-    row = matching_rows.iloc[0]
-
-    mae = (
-
-        f"{row['MAE_px_Mean']:.2f}"
-        f" ± "
-        f"{row['MAE_px_SD']:.2f}"
-
-    )
-
-
-    rmse = (
-
-        f"{row['RMSE_px_Mean']:.2f}"
-        f" ± "
-        f"{row['RMSE_px_SD']:.2f}"
-
-    )
-
-
-    jitter = (
-
-        f"{row['Mean_Jitter_px_Mean']:.2f}"
-        f" ± "
-        f"{row['Mean_Jitter_px_SD']:.2f}"
-
-    )
-
-
-    variation = (
-
-        f"{row['Total_Variation_px_Mean']:.2f}"
-        f" ± "
-        f"{row['Total_Variation_px_SD']:.2f}"
-
-    )
+for _, row in final_df.iterrows():
 
 
     print(
 
-        f"{method:<20}"
+        f"{row['Method']:<20}"
 
-        f"{mae:>20}"
+        f"{row['MAE_Mean']:.2f}"
+        f" ± "
+        f"{row['MAE_SD']:.2f}".rjust(15)
 
-        f"{rmse:>20}"
+        +
 
-        f"{jitter:>20}"
+        f"{row['RMSE_Mean']:.2f}"
+        f" ± "
+        f"{row['RMSE_SD']:.2f}".rjust(15)
 
-        f"{variation:>22}"
+        +
+
+        f"{row['Jitter_Mean']:.2f}"
+        f" ± "
+        f"{row['Jitter_SD']:.2f}".rjust(15)
+
+        +
+
+        f"{row['TV_Mean']:.2f}"
+        f" ± "
+        f"{row['TV_SD']:.2f}".rjust(17)
 
     )
 
 
 # ============================================================
-# IMPROVEMENT USING MEAN VALUES
+# IMPROVEMENT
 # ============================================================
 
-baseline = final_df[
-    final_df["Method"] == "Baseline"
+baseline_rows = final_df[
+
+    final_df["Method"]
+    ==
+    "Baseline"
+
 ]
 
 
-if len(baseline) > 0:
+if len(baseline_rows) > 0:
+
 
     baseline_mae = float(
-        baseline[
-            "MAE_px_Mean"
+
+        baseline_rows[
+            "MAE_Mean"
         ].iloc[0]
+
     )
 
+
     baseline_jitter = float(
-        baseline[
-            "Mean_Jitter_px_Mean"
+
+        baseline_rows[
+            "Jitter_Mean"
         ].iloc[0]
+
     )
 
 
@@ -621,27 +852,35 @@ if len(baseline) > 0:
     ]:
 
 
-        method_rows = final_df[
-            final_df["Method"] == method
+        rows = final_df[
+
+            final_df["Method"]
+            ==
+            method
+
         ]
 
 
-        if len(method_rows) == 0:
+        if len(rows) == 0:
 
             continue
 
 
-        method_mae = float(
-            method_rows[
-                "MAE_px_Mean"
+        mae = float(
+
+            rows[
+                "MAE_Mean"
             ].iloc[0]
+
         )
 
 
-        method_jitter = float(
-            method_rows[
-                "Mean_Jitter_px_Mean"
+        jitter = float(
+
+            rows[
+                "Jitter_Mean"
             ].iloc[0]
+
         )
 
 
@@ -650,7 +889,7 @@ if len(baseline) > 0:
             (
                 baseline_mae
                 -
-                method_mae
+                mae
             )
 
             /
@@ -665,7 +904,7 @@ if len(baseline) > 0:
             (
                 baseline_jitter
                 -
-                method_jitter
+                jitter
             )
 
             /
@@ -713,21 +952,13 @@ print("=" * 100)
 print()
 
 print(
-    f"Raw trial results:"
-)
-
-print(
-    combined_file
+    f"Raw trial results: {raw_file}"
 )
 
 print()
 
 print(
-    f"Final mean ± SD:"
-)
-
-print(
-    final_file
+    f"Final mean ± SD: {final_file}"
 )
 
 print()
