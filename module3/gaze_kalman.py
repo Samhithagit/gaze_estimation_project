@@ -7,89 +7,215 @@ import numpy as np
 
 class FixedKalmanGaze:
     """
-    Fixed-parameter Kalman filter for screen gaze coordinates.
+    Constant-velocity Kalman filter for screen-space gaze.
 
     State:
-        x = [screen_x, screen_y]
+
+        [x, y, vx, vy]
 
     Measurement:
-        z = [measured_screen_x, measured_screen_y]
 
-    Q = fixed process noise
-    R = fixed measurement noise
+        [screen_x, screen_y]
+
+    The filter assumes that gaze position evolves with
+    approximately constant velocity between frames.
     """
 
     def __init__(
         self,
-        process_noise=0.01,
-        measurement_noise=1.0,
-        initial_uncertainty=1.0
+        process_noise=25.0,
+        measurement_noise=100.0,
+        initial_uncertainty=100.0,
+        dt=1.0
     ):
 
-        self.process_noise = float(process_noise)
-        self.measurement_noise = float(measurement_noise)
-        self.initial_uncertainty = float(initial_uncertainty)
-
-        self.A = np.eye(2, dtype=np.float64)
-        self.H = np.eye(2, dtype=np.float64)
-
-        self.Q = (
-            np.eye(2, dtype=np.float64)
-            * self.process_noise
+        self.process_noise = float(
+            process_noise
         )
 
+        self.measurement_noise = float(
+            measurement_noise
+        )
+
+        self.initial_uncertainty = float(
+            initial_uncertainty
+        )
+
+        self.dt = float(dt)
+
+        # ----------------------------------------------------
+        # STATE TRANSITION MATRIX
+        #
+        # x'  = x + vx * dt
+        # y'  = y + vy * dt
+        # vx' = vx
+        # vy' = vy
+        # ----------------------------------------------------
+
+        self.A = np.array([
+
+            [1.0, 0.0, self.dt, 0.0],
+
+            [0.0, 1.0, 0.0, self.dt],
+
+            [0.0, 0.0, 1.0, 0.0],
+
+            [0.0, 0.0, 0.0, 1.0]
+
+        ], dtype=np.float64)
+
+        # ----------------------------------------------------
+        # MEASUREMENT MATRIX
+        #
+        # We observe x and y only.
+        # ----------------------------------------------------
+
+        self.H = np.array([
+
+            [1.0, 0.0, 0.0, 0.0],
+
+            [0.0, 1.0, 0.0, 0.0]
+
+        ], dtype=np.float64)
+
+        # ----------------------------------------------------
+        # Base Q
+        #
+        # Standard constant-velocity process-noise structure.
+        # ----------------------------------------------------
+
+        self.Q = self._build_Q(
+            self.process_noise
+        )
+
+        # ----------------------------------------------------
+        # Measurement noise
+        # ----------------------------------------------------
+
         self.R = (
-            np.eye(2, dtype=np.float64)
+            np.eye(
+                2,
+                dtype=np.float64
+            )
             * self.measurement_noise
         )
 
+        # ----------------------------------------------------
+        # Initial covariance
+        # ----------------------------------------------------
+
         self.P = (
-            np.eye(2, dtype=np.float64)
+            np.eye(
+                4,
+                dtype=np.float64
+            )
             * self.initial_uncertainty
         )
 
         self.state = None
 
+        self.last_innovation = None
+        self.last_innovation_magnitude = None
+
+    # ========================================================
+    # BUILD PROCESS NOISE MATRIX
+    # ========================================================
+
+    def _build_Q(self, q_value):
+
+        dt = self.dt
+
+        G = np.array([
+
+            [0.5 * dt ** 2, 0.0],
+
+            [0.0, 0.5 * dt ** 2],
+
+            [dt, 0.0],
+
+            [0.0, dt]
+
+        ], dtype=np.float64)
+
+        return (
+            q_value
+            * (G @ G.T)
+        )
+
+    # ========================================================
+    # RESET
+    # ========================================================
 
     def reset(self):
 
         self.P = (
-            np.eye(2, dtype=np.float64)
+            np.eye(
+                4,
+                dtype=np.float64
+            )
             * self.initial_uncertainty
         )
 
         self.state = None
 
+        self.last_innovation = None
+        self.last_innovation_magnitude = None
+
+    # ========================================================
+    # MEASUREMENT
+    # ========================================================
+
+    def _get_measurement(
+        self,
+        screen_x,
+        screen_y
+    ):
+
+        try:
+
+            measurement = np.array([
+
+                float(screen_x),
+                float(screen_y)
+
+            ], dtype=np.float64)
+
+        except (
+            TypeError,
+            ValueError
+        ):
+
+            return None
+
+        if not np.all(
+            np.isfinite(measurement)
+        ):
+
+            return None
+
+        return measurement
+
+    # ========================================================
+    # UPDATE
+    # ========================================================
 
     def update(
         self,
         screen_x,
         screen_y,
-        confidence=None
+        confidence=None,
+        head_motion=None,
+        measurement_valid=True
     ):
 
-        if screen_x is None or screen_y is None:
-            return None
+        measurement = self._get_measurement(
+            screen_x,
+            screen_y
+        )
 
-        try:
-
-            measurement = np.array(
-                [
-                    float(screen_x),
-                    float(screen_y)
-                ],
-                dtype=np.float64
-            )
-
-        except (TypeError, ValueError):
+        if measurement is None:
 
             return None
-
-
-        if not np.all(np.isfinite(measurement)):
-
-            return None
-
 
         # ----------------------------------------------------
         # INITIALIZATION
@@ -97,13 +223,24 @@ class FixedKalmanGaze:
 
         if self.state is None:
 
-            self.state = measurement.copy()
+            self.state = np.array([
+
+                measurement[0],
+                measurement[1],
+                0.0,
+                0.0
+
+            ], dtype=np.float64)
 
             return {
-                "x": float(self.state[0]),
-                "y": float(self.state[1])
-            }
 
+                "x": float(self.state[0]),
+                "y": float(self.state[1]),
+                "vx": float(self.state[2]),
+                "vy": float(self.state[3]),
+                "innovation": 0.0
+
+            }
 
         # ----------------------------------------------------
         # PREDICTION
@@ -120,116 +257,172 @@ class FixedKalmanGaze:
             + self.Q
         )
 
+        # ----------------------------------------------------
+        # INVALID MEASUREMENT
+        #
+        # Prediction only.
+        # ----------------------------------------------------
+
+        if not measurement_valid:
+
+            self.state = predicted_state
+
+            self.P = predicted_covariance
+
+            return {
+
+                "x": float(self.state[0]),
+                "y": float(self.state[1]),
+                "vx": float(self.state[2]),
+                "vy": float(self.state[3]),
+                "innovation": None
+
+            }
 
         # ----------------------------------------------------
         # INNOVATION
         # ----------------------------------------------------
 
         innovation = (
+
             measurement
             - self.H @ predicted_state
+
         )
 
+        innovation_magnitude = float(
+            np.linalg.norm(
+                innovation
+            )
+        )
+
+        self.last_innovation = (
+            innovation.copy()
+        )
+
+        self.last_innovation_magnitude = (
+            innovation_magnitude
+        )
+
+        # ----------------------------------------------------
+        # INNOVATION COVARIANCE
+        # ----------------------------------------------------
+
         innovation_covariance = (
+
             self.H
             @ predicted_covariance
             @ self.H.T
             + self.R
-        )
 
+        )
 
         # ----------------------------------------------------
         # KALMAN GAIN
         # ----------------------------------------------------
 
         kalman_gain = (
+
             predicted_covariance
             @ self.H.T
             @ np.linalg.inv(
                 innovation_covariance
             )
-        )
 
+        )
 
         # ----------------------------------------------------
         # STATE UPDATE
         # ----------------------------------------------------
 
         self.state = (
+
             predicted_state
             + kalman_gain @ innovation
-        )
 
+        )
 
         # ----------------------------------------------------
         # COVARIANCE UPDATE
         # ----------------------------------------------------
 
         identity = np.eye(
-            2,
+            4,
             dtype=np.float64
         )
 
         self.P = (
+
             identity
             - kalman_gain @ self.H
+
         ) @ predicted_covariance
 
-
         return {
+
             "x": float(self.state[0]),
-            "y": float(self.state[1])
+            "y": float(self.state[1]),
+            "vx": float(self.state[2]),
+            "vy": float(self.state[3]),
+            "innovation": innovation_magnitude
+
         }
 
 
 # ============================================================
-# ADAPTIVE Q KALMAN
+# ADAPTIVE Q
 # ============================================================
 
 class AdaptiveQKalmanGaze(FixedKalmanGaze):
-
     """
-    Adaptive-Q Kalman filter operating on screen coordinates.
+    Adaptive process-noise Kalman filter.
 
-    Q increases when the innovation becomes large.
+    Q responds to frame-to-frame HEAD-POSE CHANGE.
 
-    Large innovation:
-        likely rapid gaze movement
-        -> increase Q
-        -> filter responds faster
+        Q_t = Q_base * (1 + alpha * Delta_head)
 
-    Small innovation:
-        stable fixation
-        -> decrease Q
-        -> stronger smoothing
+    Larger head motion:
+        -> larger Q
+        -> filter can respond faster
+
+    Smaller head motion:
+        -> smaller Q
+        -> stronger temporal smoothing
     """
 
     def __init__(
         self,
-        process_noise=0.01,
-        measurement_noise=1.0,
-        initial_uncertainty=1.0,
-        q_min=0.001,
-        q_max=0.20,
-        adaptation_rate=0.10
+        process_noise=25.0,
+        measurement_noise=100.0,
+        initial_uncertainty=100.0,
+        q_alpha=1.0,
+        q_min=0.1,
+        q_max=2500.0,
+        dt=1.0
     ):
 
         super().__init__(
             process_noise,
             measurement_noise,
-            initial_uncertainty
+            initial_uncertainty,
+            dt
         )
 
-        self.q_min = float(q_min)
-        self.q_max = float(q_max)
-        self.adaptation_rate = float(
-            adaptation_rate
+        self.q_alpha = float(
+            q_alpha
+        )
+
+        self.q_min = float(
+            q_min
+        )
+
+        self.q_max = float(
+            q_max
         )
 
         self.current_q = (
             self.process_noise
         )
-
 
     def reset(self):
 
@@ -239,93 +432,39 @@ class AdaptiveQKalmanGaze(FixedKalmanGaze):
             self.process_noise
         )
 
-
     def update(
         self,
         screen_x,
         screen_y,
-        confidence=None
+        confidence=None,
+        head_motion=0.0,
+        measurement_valid=True
     ):
 
-        if screen_x is None or screen_y is None:
-            return None
+        if head_motion is None:
+            head_motion = 0.0
 
-
-        try:
-
-            measurement = np.array(
-                [
-                    float(screen_x),
-                    float(screen_y)
-                ],
-                dtype=np.float64
-            )
-
-        except (TypeError, ValueError):
-
-            return None
-
-
-        if not np.all(np.isfinite(measurement)):
-
-            return None
-
-
-        # ----------------------------------------------------
-        # INITIALIZATION
-        # ----------------------------------------------------
-
-        if self.state is None:
-
-            self.state = measurement.copy()
-
-            return {
-                "x": float(self.state[0]),
-                "y": float(self.state[1])
-            }
-
-
-        # ----------------------------------------------------
-        # PREDICTION
-        # ----------------------------------------------------
-
-        predicted_state = (
-            self.A @ self.state
+        head_motion = max(
+            0.0,
+            float(head_motion)
         )
 
-        predicted_covariance = (
-            self.A
-            @ self.P
-            @ self.A.T
-            + self.Q
-        )
-
-
         # ----------------------------------------------------
-        # INNOVATION
-        # ----------------------------------------------------
-
-        innovation = (
-            measurement
-            - self.H @ predicted_state
-        )
-
-
-        innovation_magnitude = float(
-            np.linalg.norm(innovation)
-        )
-
-
-        # ----------------------------------------------------
-        # ADAPT Q
+        # ADAPT Q FROM HEAD MOTION
+        #
+        # Q_t = Q_base(1 + alpha * Delta_head)
         # ----------------------------------------------------
 
         q_value = (
-            self.process_noise
-            + self.adaptation_rate
-            * innovation_magnitude ** 2
-        )
 
+            self.process_noise
+            * (
+                1.0
+                + self.q_alpha
+                * head_motion
+            )
+
+        )
 
         self.current_q = float(
             np.clip(
@@ -335,154 +474,93 @@ class AdaptiveQKalmanGaze(FixedKalmanGaze):
             )
         )
 
-
-        self.Q = (
-            np.eye(2, dtype=np.float64)
-            * self.current_q
+        self.Q = self._build_Q(
+            self.current_q
         )
 
-
-        # Recalculate prediction covariance
-        predicted_covariance = (
-            self.A
-            @ self.P
-            @ self.A.T
-            + self.Q
+        return super().update(
+            screen_x,
+            screen_y,
+            confidence=confidence,
+            head_motion=head_motion,
+            measurement_valid=measurement_valid
         )
-
-
-        # ----------------------------------------------------
-        # KALMAN UPDATE
-        # ----------------------------------------------------
-
-        innovation_covariance = (
-            self.H
-            @ predicted_covariance
-            @ self.H.T
-            + self.R
-        )
-
-
-        kalman_gain = (
-            predicted_covariance
-            @ self.H.T
-            @ np.linalg.inv(
-                innovation_covariance
-            )
-        )
-
-
-        self.state = (
-            predicted_state
-            + kalman_gain @ innovation
-        )
-
-
-        identity = np.eye(
-            2,
-            dtype=np.float64
-        )
-
-        self.P = (
-            identity
-            - kalman_gain @ self.H
-        ) @ predicted_covariance
-
-
-        return {
-            "x": float(self.state[0]),
-            "y": float(self.state[1])
-        }
 
 
 # ============================================================
-# ADAPTIVE R KALMAN
+# ADAPTIVE R
 # ============================================================
 
 class AdaptiveRKalmanGaze(FixedKalmanGaze):
-
     """
-    Adaptive-R Kalman filter operating on screen coordinates.
+    Adaptive measurement-noise Kalman filter.
 
-    Measurement noise R is controlled by gaze confidence.
+    R responds to L2CS entropy-based confidence.
+
+        R_t = R_base * exp(k * (1 - C_t))
 
     High confidence:
-        lower R
-        -> trust Ridge measurement more
+        -> smaller R
+        -> trust measurement more
 
     Low confidence:
-        higher R
+        -> larger R
         -> trust prediction more
     """
 
     def __init__(
         self,
-        process_noise=0.01,
-        measurement_noise=1.0,
-        initial_uncertainty=1.0,
-        r_min=0.10,
-        r_max=10.0
+        process_noise=25.0,
+        measurement_noise=100.0,
+        initial_uncertainty=100.0,
+        r_k=2.0,
+        r_min=25.0,
+        r_max=1000.0,
+        dt=1.0
     ):
 
         super().__init__(
             process_noise,
             measurement_noise,
-            initial_uncertainty
+            initial_uncertainty,
+            dt
         )
 
-        self.r_min = float(r_min)
-        self.r_max = float(r_max)
+        self.r_k = float(
+            r_k
+        )
 
+        self.r_min = float(
+            r_min
+        )
+
+        self.r_max = float(
+            r_max
+        )
+
+        self.current_r = (
+            self.measurement_noise
+        )
+
+    def reset(self):
+
+        super().reset()
+
+        self.current_r = (
+            self.measurement_noise
+        )
 
     def update(
         self,
         screen_x,
         screen_y,
-        confidence=None
+        confidence=None,
+        head_motion=None,
+        measurement_valid=True
     ):
 
-        if screen_x is None or screen_y is None:
-            return None
-
-
-        try:
-
-            measurement = np.array(
-                [
-                    float(screen_x),
-                    float(screen_y)
-                ],
-                dtype=np.float64
-            )
-
-        except (TypeError, ValueError):
-
-            return None
-
-
-        if not np.all(np.isfinite(measurement)):
-
-            return None
-
-
-        if self.state is None:
-
-            self.state = measurement.copy()
-
-            return {
-                "x": float(self.state[0]),
-                "y": float(self.state[1])
-            }
-
-
-        # ----------------------------------------------------
-        # CONFIDENCE → R
-        # ----------------------------------------------------
-
         if confidence is None:
-
             confidence = 0.5
-
 
         confidence = float(
             np.clip(
@@ -492,98 +570,47 @@ class AdaptiveRKalmanGaze(FixedKalmanGaze):
             )
         )
 
-
-        # High confidence → low R
-        # Low confidence  → high R
+        # ----------------------------------------------------
+        # ADAPT R FROM CONFIDENCE
+        #
+        # R_t = R_base * exp(k(1-C_t))
+        # ----------------------------------------------------
 
         r_value = (
-            self.r_max
-            - confidence
-            * (
-                self.r_max
-                - self.r_min
+
+            self.measurement_noise
+            * np.exp(
+                self.r_k
+                * (1.0 - confidence)
             )
+
         )
 
+        self.current_r = float(
+            np.clip(
+                r_value,
+                self.r_min,
+                self.r_max
+            )
+        )
 
         self.R = (
-            np.eye(2, dtype=np.float64)
-            * r_value
-        )
 
-
-        # ----------------------------------------------------
-        # PREDICTION
-        # ----------------------------------------------------
-
-        predicted_state = (
-            self.A @ self.state
-        )
-
-        predicted_covariance = (
-            self.A
-            @ self.P
-            @ self.A.T
-            + self.Q
-        )
-
-
-        # ----------------------------------------------------
-        # INNOVATION
-        # ----------------------------------------------------
-
-        innovation = (
-            measurement
-            - self.H @ predicted_state
-        )
-
-
-        innovation_covariance = (
-            self.H
-            @ predicted_covariance
-            @ self.H.T
-            + self.R
-        )
-
-
-        # ----------------------------------------------------
-        # KALMAN GAIN
-        # ----------------------------------------------------
-
-        kalman_gain = (
-            predicted_covariance
-            @ self.H.T
-            @ np.linalg.inv(
-                innovation_covariance
+            np.eye(
+                2,
+                dtype=np.float64
             )
+            * self.current_r
+
         )
 
-
-        # ----------------------------------------------------
-        # UPDATE
-        # ----------------------------------------------------
-
-        self.state = (
-            predicted_state
-            + kalman_gain @ innovation
+        return super().update(
+            screen_x,
+            screen_y,
+            confidence=confidence,
+            head_motion=head_motion,
+            measurement_valid=measurement_valid
         )
-
-
-        identity = np.eye(
-            2,
-            dtype=np.float64
-        )
-
-        self.P = (
-            identity
-            - kalman_gain @ self.H
-        ) @ predicted_covariance
-
-
-        return {
-            "x": float(self.state[0]),
-            "y": float(self.state[1])
-        }
 
 
 # ============================================================
@@ -591,56 +618,62 @@ class AdaptiveRKalmanGaze(FixedKalmanGaze):
 # ============================================================
 
 class AdaptiveQRKalmanGaze(FixedKalmanGaze):
-
     """
-    Proposed Adaptive Q+R Kalman filter.
+    Proposed adaptive Kalman filter.
 
-    Q:
-        adapted from innovation magnitude.
+    Q responds to head motion.
 
-    R:
-        adapted from gaze confidence.
+    R responds to L2CS confidence.
 
-    Therefore:
+        Q_t = Q_base(1 + alpha * Delta_head)
 
-        Head/gaze movement
-              ↓
-             Q
-
-        Gaze confidence
-              ↓
-             R
-
-    Both process and measurement uncertainty are adapted.
+        R_t = R_base * exp(k(1-C_t))
     """
 
     def __init__(
         self,
-        process_noise=0.01,
-        measurement_noise=1.0,
-        initial_uncertainty=1.0,
-        q_min=0.001,
-        q_max=0.20,
-        q_adaptation_rate=0.10,
-        r_min=0.10,
-        r_max=10.0
+        process_noise=25.0,
+        measurement_noise=100.0,
+        initial_uncertainty=100.0,
+        q_alpha=1.0,
+        q_min=0.1,
+        q_max=2500.0,
+        r_k=2.0,
+        r_min=25.0,
+        r_max=1000.0,
+        dt=1.0
     ):
 
         super().__init__(
             process_noise,
             measurement_noise,
-            initial_uncertainty
+            initial_uncertainty,
+            dt
         )
 
-        self.q_min = float(q_min)
-        self.q_max = float(q_max)
-
-        self.q_adaptation_rate = float(
-            q_adaptation_rate
+        self.q_alpha = float(
+            q_alpha
         )
 
-        self.r_min = float(r_min)
-        self.r_max = float(r_max)
+        self.q_min = float(
+            q_min
+        )
+
+        self.q_max = float(
+            q_max
+        )
+
+        self.r_k = float(
+            r_k
+        )
+
+        self.r_min = float(
+            r_min
+        )
+
+        self.r_max = float(
+            r_max
+        )
 
         self.current_q = (
             self.process_noise
@@ -649,7 +682,6 @@ class AdaptiveQRKalmanGaze(FixedKalmanGaze):
         self.current_r = (
             self.measurement_noise
         )
-
 
     def reset(self):
 
@@ -663,84 +695,41 @@ class AdaptiveQRKalmanGaze(FixedKalmanGaze):
             self.measurement_noise
         )
 
-
     def update(
         self,
         screen_x,
         screen_y,
-        confidence=None
+        confidence=None,
+        head_motion=0.0,
+        measurement_valid=True
     ):
 
-        if screen_x is None or screen_y is None:
-            return None
+        # ----------------------------------------------------
+        # HEAD MOTION
+        # ----------------------------------------------------
 
+        if head_motion is None:
+            head_motion = 0.0
 
-        try:
-
-            measurement = np.array(
-                [
-                    float(screen_x),
-                    float(screen_y)
-                ],
-                dtype=np.float64
-            )
-
-        except (TypeError, ValueError):
-
-            return None
-
-
-        if not np.all(np.isfinite(measurement)):
-
-            return None
-
-
-        if self.state is None:
-
-            self.state = measurement.copy()
-
-            return {
-                "x": float(self.state[0]),
-                "y": float(self.state[1])
-            }
-
-
-        # ====================================================
-        # PREDICTION
-        # ====================================================
-
-        predicted_state = (
-            self.A @ self.state
+        head_motion = max(
+            0.0,
+            float(head_motion)
         )
 
-
-        # ====================================================
-        # INNOVATION
-        # ====================================================
-
-        innovation = (
-            measurement
-            - self.H @ predicted_state
-        )
-
-
-        innovation_magnitude = float(
-            np.linalg.norm(innovation)
-        )
-
-
-        # ====================================================
+        # ----------------------------------------------------
         # ADAPT Q
-        # ====================================================
+        # ----------------------------------------------------
 
         q_value = (
-            self.process_noise
-            +
-            self.q_adaptation_rate
-            *
-            innovation_magnitude ** 2
-        )
 
+            self.process_noise
+            * (
+                1.0
+                + self.q_alpha
+                * head_motion
+            )
+
+        )
 
         self.current_q = float(
             np.clip(
@@ -750,21 +739,16 @@ class AdaptiveQRKalmanGaze(FixedKalmanGaze):
             )
         )
 
-
-        self.Q = (
-            np.eye(2, dtype=np.float64)
-            * self.current_q
+        self.Q = self._build_Q(
+            self.current_q
         )
 
-
-        # ====================================================
-        # ADAPT R
-        # ====================================================
+        # ----------------------------------------------------
+        # CONFIDENCE
+        # ----------------------------------------------------
 
         if confidence is None:
-
             confidence = 0.5
-
 
         confidence = float(
             np.clip(
@@ -774,94 +758,46 @@ class AdaptiveQRKalmanGaze(FixedKalmanGaze):
             )
         )
 
+        # ----------------------------------------------------
+        # ADAPT R
+        # ----------------------------------------------------
 
         r_value = (
-            self.r_max
-            -
-            confidence
-            *
-            (
-                self.r_max
-                -
-                self.r_min
-            )
-        )
 
+            self.measurement_noise
+            * np.exp(
+                self.r_k
+                * (1.0 - confidence)
+            )
+
+        )
 
         self.current_r = float(
-            r_value
-        )
-
-
-        self.R = (
-            np.eye(2, dtype=np.float64)
-            * self.current_r
-        )
-
-
-        # ====================================================
-        # PREDICT COVARIANCE
-        # ====================================================
-
-        predicted_covariance = (
-            self.A
-            @ self.P
-            @ self.A.T
-            + self.Q
-        )
-
-
-        # ====================================================
-        # INNOVATION COVARIANCE
-        # ====================================================
-
-        innovation_covariance = (
-            self.H
-            @ predicted_covariance
-            @ self.H.T
-            + self.R
-        )
-
-
-        # ====================================================
-        # KALMAN GAIN
-        # ====================================================
-
-        kalman_gain = (
-            predicted_covariance
-            @ self.H.T
-            @ np.linalg.inv(
-                innovation_covariance
+            np.clip(
+                r_value,
+                self.r_min,
+                self.r_max
             )
         )
 
+        self.R = (
 
-        # ====================================================
-        # STATE UPDATE
-        # ====================================================
+            np.eye(
+                2,
+                dtype=np.float64
+            )
+            * self.current_r
 
-        self.state = (
-            predicted_state
-            + kalman_gain @ innovation
         )
 
+        # ----------------------------------------------------
+        # KALMAN UPDATE
+        # ----------------------------------------------------
 
-        # ====================================================
-        # COVARIANCE UPDATE
-        # ====================================================
-
-        identity = np.eye(
-            2,
-            dtype=np.float64
+        return super().update(
+            screen_x,
+            screen_y,
+            confidence=confidence,
+            head_motion=head_motion,
+            measurement_valid=measurement_valid
         )
-
-        self.P = (
-            identity
-            - kalman_gain @ self.H
-        ) @ predicted_covariance
-
-
-        return {
-            "x": float(self.state[0]),
-            "y": float(self.state[1])
-        }

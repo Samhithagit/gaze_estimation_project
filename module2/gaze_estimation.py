@@ -26,20 +26,10 @@ class GazeEstimator:
 
         self.backbone = resnet50(weights=None)
 
-        # Remove ImageNet classifier
         self.backbone.fc = nn.Identity()
 
         # =====================================================
         # GAZE HEADS
-        #
-        # IMPORTANT:
-        # Checkpoint contains:
-        #
-        # fc_yaw_gaze.weight   [90, 2048]
-        # fc_yaw_gaze.bias     [90]
-        #
-        # fc_pitch_gaze.weight [90, 2048]
-        # fc_pitch_gaze.bias   [90]
         # =====================================================
 
         self.fc_yaw_gaze = nn.Linear(
@@ -61,7 +51,6 @@ class GazeEstimator:
             map_location=self.device
         )
 
-        # Handle checkpoints containing state_dict
         if "state_dict" in checkpoint:
             checkpoint = checkpoint["state_dict"]
 
@@ -87,6 +76,7 @@ class GazeEstimator:
                 or key.startswith("layer3")
                 or key.startswith("layer4")
             ):
+
                 backbone_state[key] = value
 
         self.backbone.load_state_dict(
@@ -142,6 +132,7 @@ class GazeEstimator:
                     0.456,
                     0.406
                 ],
+
                 std=[
                     0.229,
                     0.224,
@@ -167,7 +158,7 @@ class GazeEstimator:
         print("Yaw/Pitch heads loaded")
 
     # =========================================================
-    # CONVERT CLASSIFICATION BINS TO ANGLE
+    # BINS → ANGLE + ENTROPY CONFIDENCE
     # =========================================================
 
     def bins_to_angle(self, logits):
@@ -182,9 +173,15 @@ class GazeEstimator:
         # -----------------------------------------------------
 
         bin_centers = torch.linspace(
-            self.angle_min + self.bin_width / 2,
-            self.angle_max - self.bin_width / 2,
+
+            self.angle_min
+            + self.bin_width / 2,
+
+            self.angle_max
+            - self.bin_width / 2,
+
             self.num_bins,
+
             device=logits.device
         )
 
@@ -198,32 +195,37 @@ class GazeEstimator:
         )
 
         # -----------------------------------------------------
-        # ENTROPY-BASED CONFIDENCE
-        #
-        # A concentrated probability distribution
-        # = high confidence
-        #
-        # A spread-out distribution
-        # = low confidence
+        # Shannon entropy
         # -----------------------------------------------------
 
         entropy = -torch.sum(
-            probabilities *
-            torch.log(
+
+            probabilities
+            * torch.log(
                 probabilities + 1e-8
             ),
+
             dim=1
         )
+
+        # -----------------------------------------------------
+        # Maximum entropy
+        # -----------------------------------------------------
 
         max_entropy = math.log(
             self.num_bins
         )
 
+        # -----------------------------------------------------
+        # NORMALIZED ENTROPY CONFIDENCE
+        #
+        # C = 1 - H / log(N)
+        # -----------------------------------------------------
+
         confidence = 1.0 - (
             entropy / max_entropy
         )
 
-        # Keep confidence in [0, 1]
         confidence = torch.clamp(
             confidence,
             0.0,
@@ -237,21 +239,18 @@ class GazeEstimator:
 
     # =========================================================
     # PREDICT GAZE
-    #
-    # This function handles ONE eye.
-    #
-    # Fusion of LEFT + RIGHT should happen outside.
     # =========================================================
 
     def predict_gaze(self, eye_image):
 
         if eye_image is None:
+
             return None, None, 0.0
 
         try:
 
             # -------------------------------------------------
-            # OpenCV image -> PIL
+            # OpenCV image → PIL
             # -------------------------------------------------
 
             image = Image.fromarray(
@@ -291,7 +290,7 @@ class GazeEstimator:
                 )
 
             # -------------------------------------------------
-            # CONVERT TO ANGLES
+            # ANGLES + CONFIDENCE
             # -------------------------------------------------
 
             yaw, yaw_conf = self.bins_to_angle(
@@ -303,12 +302,15 @@ class GazeEstimator:
             )
 
             # -------------------------------------------------
-            # COMBINE YAW + PITCH CONFIDENCE
+            # CONSERVATIVE CONFIDENCE
+            #
+            # Use the less-confident dimension.
             # -------------------------------------------------
 
-            confidence = (
-                yaw_conf + pitch_conf
-            ) / 2.0
+            confidence = min(
+                yaw_conf,
+                pitch_conf
+            )
 
             return (
                 yaw,
