@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import mediapipe as mp
+import atexit
 
 
 # ============================================================
@@ -8,6 +9,34 @@ import mediapipe as mp
 # ============================================================
 
 mp_face = mp.solutions.face_mesh
+
+_HEAD_POSE_DEBUG_COUNTS = {
+    'face_landmarks_missing': 0,
+    'non_finite_landmarks': 0,
+    'pnp_exception': 0,
+    'pnp_unsuccessful': 0,
+    'reprojection_error_high': 0,
+    'non_finite_angles': 0,
+    'invalid_frame': 0,
+}
+
+def reset_head_pose_debug_counts():
+    """Reset rejection counters for a new collection run."""
+    for key in _HEAD_POSE_DEBUG_COUNTS:
+        _HEAD_POSE_DEBUG_COUNTS[key] = 0
+
+def get_head_pose_debug_counts():
+    """Return a copy of the head-pose rejection counters."""
+    return dict(_HEAD_POSE_DEBUG_COUNTS)
+
+def _print_head_pose_debug_summary():
+    total = sum(_HEAD_POSE_DEBUG_COUNTS.values())
+    print('\\nHEAD-POSE DEBUG SUMMARY')
+    print(f'Total rejected frames counted: {total}')
+    for reason, count in _HEAD_POSE_DEBUG_COUNTS.items():
+        print(f'  {reason}: {count}')
+
+atexit.register(_print_head_pose_debug_summary)
 
 face_mesh = mp_face.FaceMesh(
     refine_landmarks=True,
@@ -161,11 +190,13 @@ def rotation_matrix_to_angles(rotation_matrix):
 def estimate_head_pose(frame):
 
     if frame is None:
+        _HEAD_POSE_DEBUG_COUNTS['invalid_frame'] += 1
         return None
 
     height, width = frame.shape[:2]
 
     if width < 100 or height < 100:
+        _HEAD_POSE_DEBUG_COUNTS['invalid_frame'] += 1
         return None
 
     # --------------------------------------------------------
@@ -182,6 +213,7 @@ def estimate_head_pose(frame):
     )
 
     if not results.multi_face_landmarks:
+        _HEAD_POSE_DEBUG_COUNTS['face_landmarks_missing'] += 1
         return None
 
     face_landmarks = (
@@ -206,6 +238,7 @@ def estimate_head_pose(frame):
         y = landmark.y * height
 
         if not np.isfinite(x) or not np.isfinite(y):
+            _HEAD_POSE_DEBUG_COUNTS['non_finite_landmarks'] += 1
             return None
 
         image_points.append([
@@ -236,27 +269,24 @@ def estimate_head_pose(frame):
     # PnP
     # --------------------------------------------------------
 
+    
     try:
-
-        success, rotation_vector, translation_vector, inliers = (
-            cv2.solvePnPRansac(
+        success, rotation_vector, translation_vector = (
+            cv2.solvePnP(
                 MODEL_POINTS,
                 image_points,
                 camera_matrix,
                 distortion_coefficients,
-                flags=cv2.SOLVEPNP_ITERATIVE,
-                iterationsCount=100,
-                reprojectionError=8.0,
-                confidence=0.99
+                flags=cv2.SOLVEPNP_ITERATIVE
             )
         )
-
-    except cv2.error:
-
+    except cv2.error as e:
+        print("solvePnP error:", e)
         return None
 
     if not success:
         return None
+
 
     # --------------------------------------------------------
     # LM refinement
@@ -295,7 +325,8 @@ def estimate_head_pose(frame):
     )
 
     # Reject poor estimates
-    if reprojection_error > 20.0:
+    if not np.isfinite(reprojection_error) or reprojection_error > 20.0:
+        _HEAD_POSE_DEBUG_COUNTS['reprojection_error_high'] += 1
         return None
 
     # --------------------------------------------------------
@@ -324,6 +355,7 @@ def estimate_head_pose(frame):
             roll
         ]
     ):
+        _HEAD_POSE_DEBUG_COUNTS['non_finite_angles'] += 1
         return None
 
     return {

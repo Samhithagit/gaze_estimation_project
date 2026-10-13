@@ -2,6 +2,7 @@ import os
 import sys
 import csv
 import numpy as np
+from sklearn.linear_model import Ridge
 
 from ridge_gaze_mapper import RidgeGazeMapper
 
@@ -9,7 +10,7 @@ from module3.gaze_kalman import (
     FixedKalmanGaze,
     AdaptiveQKalmanGaze,
     AdaptiveRKalmanGaze,
-    AdaptiveQRKalmanGaze
+    AdaptiveQRKalmanGaze,
 )
 
 
@@ -17,128 +18,117 @@ from module3.gaze_kalman import (
 # INPUT FILES
 # ============================================================
 
-if len(sys.argv) >= 3:
-
-    CALIBRATION_FILE = sys.argv[1]
-    EVALUATION_FILE = sys.argv[2]
-
-else:
-
-    print(
-        "Usage: python final_evaluation.py "
-        "calibration_data.csv evaluation_data.csv"
-    )
-
+if len(sys.argv) < 3:
+    print("Usage:")
+    print("python final_evaluation_updated.py calibration_data.csv evaluation_data.csv")
     sys.exit(1)
 
-
-# ============================================================
-# KALMAN PARAMETERS
-# ============================================================
-
-KALMAN_PROCESS_NOISE = 25.0
-KALMAN_MEASUREMENT_NOISE = 100.0
-KALMAN_INITIAL_UNCERTAINTY = 100.0
+CALIBRATION_FILE = sys.argv[1]
+EVALUATION_FILE = sys.argv[2]
 
 
 # ============================================================
-# ADAPTIVE Q
+# RIDGE SETTINGS
 # ============================================================
+
+# Baseline: raw L2CS gaze only
+BASELINE_ALPHA = 1e-6
+
+# Method 2:
+# raw L2CS gaze + head yaw + head pitch
+#
+# IMPORTANT:
+# head_roll is intentionally NOT used in Ridge.
+# The diagnostic showed that adding roll caused severe
+# evaluation degradation.
+METHOD2_ALPHA = 0.01
+
+
+# ============================================================
+# KALMAN SETTINGS
+# ============================================================
+
+# Common tuned base parameters
+KALMAN_PROCESS_NOISE = 10.0
+KALMAN_MEASUREMENT_NOISE = 25.0
+KALMAN_INITIAL_UNCERTAINTY = 25.0
+
+
+# ------------------------------------------------------------
+# Adaptive Q
+# Q_t = Q_base * (1 + alpha * head_motion)
+# ------------------------------------------------------------
 
 ADAPTIVE_Q_ALPHA = 1.0
-ADAPTIVE_Q_MIN = 0.1
-ADAPTIVE_Q_MAX = 2500.0
+ADAPTIVE_Q_MIN = 0.01
+ADAPTIVE_Q_MAX = 1000.0
+
+
+# ------------------------------------------------------------
+# Adaptive R
+# R is confidence driven
+# ------------------------------------------------------------
+
+ADAPTIVE_R_K = 3.0
+ADAPTIVE_R_MIN = 10.0
+ADAPTIVE_R_MAX = 250.0
+
+
+# ------------------------------------------------------------
+# Proposed Q + R
+# ------------------------------------------------------------
+
+PROPOSED_Q_ALPHA = 2.0
+PROPOSED_Q_MIN = 0.01
+PROPOSED_Q_MAX = 1000.0
+
+PROPOSED_R_K = 1.0
+PROPOSED_R_MIN = 10.0
+PROPOSED_R_MAX = 250.0
 
 
 # ============================================================
-# ADAPTIVE R
-# ============================================================
-
-ADAPTIVE_R_K = 2.0
-ADAPTIVE_R_MIN = 25.0
-ADAPTIVE_R_MAX = 1000.0
-
-
-# ============================================================
-# LOAD CSV
+# CSV
 # ============================================================
 
 def load_csv(filename):
-
     if not os.path.exists(filename):
         raise FileNotFoundError(filename)
 
-    rows = []
+    with open(filename, "r", newline="") as f:
+        return list(csv.DictReader(f))
 
-    with open(
-        filename,
-        "r",
-        newline=""
-    ) as f:
-
-        reader = csv.DictReader(f)
-
-        for row in reader:
-            rows.append(row)
-
-    return rows
-
-
-# ============================================================
-# FLOAT
-# ============================================================
 
 def to_float(value):
-
     try:
         return float(value)
-
-    except (
-        TypeError,
-        ValueError
-    ):
-
+    except (TypeError, ValueError):
         return None
 
 
-# ============================================================
-# VALID ROWS
-# ============================================================
-
 def valid_rows(rows):
-
-    output = []
-
     required = [
-
         "raw_gaze_yaw",
         "raw_gaze_pitch",
         "raw_confidence",
-
         "head_yaw",
         "head_pitch",
         "head_roll",
-
         "target_x",
         "target_y",
-
-        "point_idx"
-
+        "point_idx",
     ]
 
-    for row in rows:
+    output = []
 
+    for row in rows:
         values = {}
         valid = True
 
         for column in required:
-
-            value = to_float(
-                row.get(column)
-            )
+            value = to_float(row.get(column))
 
             if value is None:
-
                 valid = False
                 break
 
@@ -151,65 +141,94 @@ def valid_rows(rows):
 
 
 # ============================================================
-# FIT RIDGE
+# RIDGE MAPPERS
 # ============================================================
 
-def fit_mappers(rows):
+class SimpleRidgeMapper:
+    """
+    Local Ridge mapper used only for the updated Method 2.
 
+    Features:
+        raw_gaze_yaw
+        raw_gaze_pitch
+        head_yaw
+        head_pitch
+
+    head_roll is deliberately excluded.
+    """
+
+    def __init__(self, alpha=0.01):
+        self.model_x = Ridge(alpha=alpha)
+        self.model_y = Ridge(alpha=alpha)
+
+    def fit(
+        self,
+        gaze_yaw,
+        gaze_pitch,
+        head_yaw,
+        head_pitch,
+        target_x,
+        target_y,
+    ):
+        X = np.column_stack([
+            gaze_yaw,
+            gaze_pitch,
+            head_yaw,
+            head_pitch,
+        ])
+
+        self.model_x.fit(X, target_x)
+        self.model_y.fit(X, target_y)
+
+    def predict(
+        self,
+        gaze_yaw,
+        gaze_pitch,
+        head_yaw,
+        head_pitch,
+    ):
+        X = np.column_stack([
+            gaze_yaw,
+            gaze_pitch,
+            head_yaw,
+            head_pitch,
+        ])
+
+        return (
+            self.model_x.predict(X),
+            self.model_y.predict(X),
+        )
+
+
+def fit_mappers(rows):
     yaw = np.array(
-        [
-            r["raw_gaze_yaw"]
-            for r in rows
-        ],
-        dtype=float
+        [r["raw_gaze_yaw"] for r in rows],
+        dtype=float,
     )
 
     pitch = np.array(
-        [
-            r["raw_gaze_pitch"]
-            for r in rows
-        ],
-        dtype=float
+        [r["raw_gaze_pitch"] for r in rows],
+        dtype=float,
     )
 
     target_x = np.array(
-        [
-            r["target_x"]
-            for r in rows
-        ],
-        dtype=float
+        [r["target_x"] for r in rows],
+        dtype=float,
     )
 
     target_y = np.array(
-        [
-            r["target_y"]
-            for r in rows
-        ],
-        dtype=float
+        [r["target_y"] for r in rows],
+        dtype=float,
     )
 
     head_yaw = np.array(
-        [
-            r["head_yaw"]
-            for r in rows
-        ],
-        dtype=float
+        [r["head_yaw"] for r in rows],
+        dtype=float,
     )
 
     head_pitch = np.array(
-        [
-            r["head_pitch"]
-            for r in rows
-        ],
-        dtype=float
-    )
-
-    head_roll = np.array(
-        [
-            r["head_roll"]
-            for r in rows
-        ],
-        dtype=float
+        [r["head_pitch"] for r in rows],
+        dtype=float,
     )
 
     # ========================================================
@@ -218,210 +237,160 @@ def fit_mappers(rows):
 
     baseline_mapper = RidgeGazeMapper(
         feature_mode="gaze_only",
-        alpha=1e-6
+        alpha=BASELINE_ALPHA,
     )
 
     baseline_mapper.fit(
         yaw,
         pitch,
         target_x,
-        target_y
+        target_y,
     )
 
     # ========================================================
     # METHOD 2
     # ========================================================
+    #
+    # IMPORTANT:
+    # Do NOT use RidgeGazeMapper(feature_mode="gaze_head")
+    # here because that mode includes head_roll.
+    #
+    # We use only:
+    #   gaze yaw
+    #   gaze pitch
+    #   head yaw
+    #   head pitch
+    #
+    # This is the feature set supported by the diagnostic:
+    # "Gaze + Head Yaw + Pitch".
+    # ========================================================
 
-    method2_mapper = RidgeGazeMapper(
-        feature_mode="gaze_head",
-        alpha=0.01
+    method2_mapper = SimpleRidgeMapper(
+        alpha=METHOD2_ALPHA,
     )
 
     method2_mapper.fit(
-        yaw,
-        pitch,
-        target_x,
-        target_y,
+        gaze_yaw=yaw,
+        gaze_pitch=pitch,
         head_yaw=head_yaw,
         head_pitch=head_pitch,
-        head_roll=head_roll
+        target_x=target_x,
+        target_y=target_y,
     )
 
-    return (
-        baseline_mapper,
-        method2_mapper
-    )
+    return baseline_mapper, method2_mapper
 
 
 # ============================================================
-# PREDICT ONE ROW
+# PREDICTION
 # ============================================================
 
-def predict(
-    mapper,
-    row,
-    use_head
-):
-
+def predict_baseline(mapper, row):
     yaw = np.array(
         [row["raw_gaze_yaw"]],
-        dtype=float
+        dtype=float,
     )
 
     pitch = np.array(
         [row["raw_gaze_pitch"]],
-        dtype=float
+        dtype=float,
     )
 
-    if use_head:
+    prediction = mapper.predict(
+        yaw,
+        pitch,
+    )
 
-        prediction = mapper.predict(
-
-            yaw,
-            pitch,
-
-            head_yaw=np.array(
-                [row["head_yaw"]],
-                dtype=float
-            ),
-
-            head_pitch=np.array(
-                [row["head_pitch"]],
-                dtype=float
-            ),
-
-            head_roll=np.array(
-                [row["head_roll"]],
-                dtype=float
-            )
-        )
-
+    if isinstance(prediction, dict):
+        x = prediction["x"]
+        y = prediction["y"]
     else:
+        x = prediction[0]
+        y = prediction[1]
 
-        prediction = mapper.predict(
-            yaw,
-            pitch
-        )
+    x = np.asarray(x).reshape(-1)[0]
+    y = np.asarray(y).reshape(-1)[0]
 
-    x = np.asarray(
-        prediction[0]
-    ).reshape(-1)[0]
+    return float(x), float(y)
 
-    y = np.asarray(
-        prediction[1]
-    ).reshape(-1)[0]
+
+def predict_method2(mapper, row):
+    yaw = np.array(
+        [row["raw_gaze_yaw"]],
+        dtype=float,
+    )
+
+    pitch = np.array(
+        [row["raw_gaze_pitch"]],
+        dtype=float,
+    )
+
+    head_yaw = np.array(
+        [row["head_yaw"]],
+        dtype=float,
+    )
+
+    head_pitch = np.array(
+        [row["head_pitch"]],
+        dtype=float,
+    )
+
+    prediction = mapper.predict(
+        gaze_yaw=yaw,
+        gaze_pitch=pitch,
+        head_yaw=head_yaw,
+        head_pitch=head_pitch,
+    )
+
+    x = np.asarray(prediction[0]).reshape(-1)[0]
+    y = np.asarray(prediction[1]).reshape(-1)[0]
 
     return float(x), float(y)
 
 
 # ============================================================
-# CREATE FILTERS
+# KALMAN FILTERS
 # ============================================================
 
 def create_filters():
 
     fixed = FixedKalmanGaze(
-
         process_noise=KALMAN_PROCESS_NOISE,
-
         measurement_noise=KALMAN_MEASUREMENT_NOISE,
-
-        initial_uncertainty=KALMAN_INITIAL_UNCERTAINTY
-
+        initial_uncertainty=KALMAN_INITIAL_UNCERTAINTY,
     )
 
     adaptive_q = AdaptiveQKalmanGaze(
-
         process_noise=KALMAN_PROCESS_NOISE,
-
         measurement_noise=KALMAN_MEASUREMENT_NOISE,
-
         initial_uncertainty=KALMAN_INITIAL_UNCERTAINTY,
-
         q_alpha=ADAPTIVE_Q_ALPHA,
-
         q_min=ADAPTIVE_Q_MIN,
-
-        q_max=ADAPTIVE_Q_MAX
-
+        q_max=ADAPTIVE_Q_MAX,
     )
 
     adaptive_r = AdaptiveRKalmanGaze(
-
         process_noise=KALMAN_PROCESS_NOISE,
-
         measurement_noise=KALMAN_MEASUREMENT_NOISE,
-
         initial_uncertainty=KALMAN_INITIAL_UNCERTAINTY,
-
         r_k=ADAPTIVE_R_K,
-
         r_min=ADAPTIVE_R_MIN,
-
-        r_max=ADAPTIVE_R_MAX
-
+        r_max=ADAPTIVE_R_MAX,
     )
 
-    adaptive_qr = AdaptiveQRKalmanGaze(
-
+    proposed = AdaptiveQRKalmanGaze(
         process_noise=KALMAN_PROCESS_NOISE,
-
         measurement_noise=KALMAN_MEASUREMENT_NOISE,
-
         initial_uncertainty=KALMAN_INITIAL_UNCERTAINTY,
-
-        q_alpha=ADAPTIVE_Q_ALPHA,
-
-        q_min=ADAPTIVE_Q_MIN,
-
-        q_max=ADAPTIVE_Q_MAX,
-
-        r_k=ADAPTIVE_R_K,
-
-        r_min=ADAPTIVE_R_MIN,
-
-        r_max=ADAPTIVE_R_MAX
-
+        q_alpha=PROPOSED_Q_ALPHA,
+        q_min=PROPOSED_Q_MIN,
+        q_max=PROPOSED_Q_MAX,
+        r_k=PROPOSED_R_K,
+        r_min=PROPOSED_R_MIN,
+        r_max=PROPOSED_R_MAX,
     )
 
-    return (
-        fixed,
-        adaptive_q,
-        adaptive_r,
-        adaptive_qr
-    )
-
-
-# ============================================================
-# UPDATE FILTER
-# ============================================================
-
-def update_filter(
-    filter_object,
-    x,
-    y,
-    confidence=None,
-    head_motion=0.0
-):
-
-    result = filter_object.update(
-
-        x,
-        y,
-
-        confidence=confidence,
-
-        head_motion=head_motion
-
-    )
-
-    if result is None:
-        return None
-
-    return (
-        float(result["x"]),
-        float(result["y"])
-    )
+    return fixed, adaptive_q, adaptive_r, proposed
 
 
 # ============================================================
@@ -431,212 +400,151 @@ def update_filter(
 def evaluate(
     rows,
     baseline_mapper,
-    method2_mapper
+    method2_mapper,
 ):
-
     (
         fixed,
         adaptive_q,
         adaptive_r,
-        adaptive_qr
+        proposed,
     ) = create_filters()
 
     results = []
 
-    # --------------------------------------------------------
-    # Previous head pose
-    # --------------------------------------------------------
-
     previous_head = None
-
-    # ========================================================
-    # FRAME LOOP
-    # ========================================================
 
     for row in rows:
 
         # ----------------------------------------------------
-        # CURRENT HEAD POSE
+        # HEAD MOTION
+        # ----------------------------------------------------
+        #
+        # IMPORTANT:
+        # For adaptive Q / Proposed, use only yaw and pitch.
+        # Roll is excluded because the Ridge diagnostic showed
+        # that roll was the unstable feature.
+        #
+        # Delta_head =
+        # sqrt((yaw_t-yaw_t-1)^2 +
+        #      (pitch_t-pitch_t-1)^2)
         # ----------------------------------------------------
 
         current_head = np.array([
-
             row["head_yaw"],
             row["head_pitch"],
-            row["head_roll"]
-
         ], dtype=float)
 
-        # ----------------------------------------------------
-        # HEAD MOTION
-        #
-        # Delta_head = || H_t - H_(t-1) ||
-        # ----------------------------------------------------
-
         if previous_head is None:
-
             head_motion = 0.0
-
         else:
-
             head_motion = float(
-
                 np.linalg.norm(
-                    current_head
-                    - previous_head
+                    current_head - previous_head
                 )
-
             )
 
-        previous_head = (
-            current_head.copy()
-        )
+        previous_head = current_head.copy()
 
         # ====================================================
         # BASELINE
         # ====================================================
 
-        baseline_x, baseline_y = predict(
-
+        baseline_x, baseline_y = predict_baseline(
             baseline_mapper,
-
             row,
-
-            use_head=False
-
         )
 
         # ====================================================
         # METHOD 2
         # ====================================================
 
-        ridge_x, ridge_y = predict(
-
+        ridge_x, ridge_y = predict_method2(
             method2_mapper,
-
             row,
-
-            use_head=True
-
         )
 
         # ====================================================
         # FIXED KF
         # ====================================================
 
-        fixed_x, fixed_y = update_filter(
-
-            fixed,
-
+        fixed_result = fixed.update(
             ridge_x,
-            ridge_y
-
+            ridge_y,
         )
+
+        fixed_x = float(fixed_result["x"])
+        fixed_y = float(fixed_result["y"])
 
         # ====================================================
         # ADAPTIVE Q
         # ====================================================
 
-        q_x, q_y = update_filter(
-
-            adaptive_q,
-
+        q_result = adaptive_q.update(
             ridge_x,
             ridge_y,
-
-            head_motion=head_motion
-
+            head_motion=head_motion,
         )
+
+        q_x = float(q_result["x"])
+        q_y = float(q_result["y"])
 
         # ====================================================
         # ADAPTIVE R
         # ====================================================
 
-        r_x, r_y = update_filter(
-
-            adaptive_r,
-
+        r_result = adaptive_r.update(
             ridge_x,
             ridge_y,
-
-            confidence=row["raw_confidence"]
-
+            confidence=row["raw_confidence"],
         )
+
+        r_x = float(r_result["x"])
+        r_y = float(r_result["y"])
 
         # ====================================================
         # PROPOSED Q + R
         # ====================================================
 
-        qr_x, qr_y = update_filter(
-
-            adaptive_qr,
-
+        proposed_result = proposed.update(
             ridge_x,
             ridge_y,
-
             confidence=row["raw_confidence"],
-
-            head_motion=head_motion
-
+            head_motion=head_motion,
         )
+
+        proposed_x = float(proposed_result["x"])
+        proposed_y = float(proposed_result["y"])
 
         # ====================================================
         # STORE
         # ====================================================
 
         results.append({
+            "point_idx": int(row["point_idx"]),
 
-            "point_idx":
-                int(row["point_idx"]),
+            "target_x": row["target_x"],
+            "target_y": row["target_y"],
 
-            "target_x":
-                row["target_x"],
+            "baseline_x": baseline_x,
+            "baseline_y": baseline_y,
 
-            "target_y":
-                row["target_y"],
+            "ridge_x": ridge_x,
+            "ridge_y": ridge_y,
 
-            "baseline_x":
-                baseline_x,
+            "fixed_kf_x": fixed_x,
+            "fixed_kf_y": fixed_y,
 
-            "baseline_y":
-                baseline_y,
+            "adaptive_q_x": q_x,
+            "adaptive_q_y": q_y,
 
-            "ridge_x":
-                ridge_x,
+            "adaptive_r_x": r_x,
+            "adaptive_r_y": r_y,
 
-            "ridge_y":
-                ridge_y,
+            "adaptive_qr_x": proposed_x,
+            "adaptive_qr_y": proposed_y,
 
-            "fixed_kf_x":
-                fixed_x,
-
-            "fixed_kf_y":
-                fixed_y,
-
-            "adaptive_q_x":
-                q_x,
-
-            "adaptive_q_y":
-                q_y,
-
-            "adaptive_r_x":
-                r_x,
-
-            "adaptive_r_y":
-                r_y,
-
-            "adaptive_qr_x":
-                qr_x,
-
-            "adaptive_qr_y":
-                qr_y,
-
-            "confidence":
-                row["raw_confidence"],
-
-            "head_motion":
-                head_motion
-
+            "confidence": row["raw_confidence"],
+            "head_motion": head_motion,
         })
 
     return results
@@ -646,188 +554,105 @@ def evaluate(
 # METRICS
 # ============================================================
 
-def calculate_metrics(
-    results,
-    x_key,
-    y_key
-):
+def calculate_metrics(results, x_key, y_key):
 
     errors = []
 
     for row in results:
-
-        dx = (
-            row[x_key]
-            - row["target_x"]
-        )
-
-        dy = (
-            row[y_key]
-            - row["target_y"]
-        )
+        dx = row[x_key] - row["target_x"]
+        dy = row[y_key] - row["target_y"]
 
         errors.append(
-            np.sqrt(
-                dx ** 2
-                + dy ** 2
-            )
+            np.sqrt(dx ** 2 + dy ** 2)
         )
 
-    errors = np.asarray(
-        errors,
-        dtype=float
-    )
+    errors = np.asarray(errors, dtype=float)
 
     return {
-
-        "MAE":
-            float(
-                np.mean(errors)
-            ),
-
-        "RMSE":
-            float(
-                np.sqrt(
-                    np.mean(
-                        errors ** 2
-                    )
-                )
-            ),
-
-        "Median":
-            float(
-                np.median(errors)
-            ),
-
-        "P95":
-            float(
-                np.percentile(
-                    errors,
-                    95
-                )
-            )
-
+        "MAE": float(np.mean(errors)),
+        "RMSE": float(
+            np.sqrt(np.mean(errors ** 2))
+        ),
+        "Median": float(np.median(errors)),
+        "P95": float(np.percentile(errors, 95)),
     }
 
 
-# ============================================================
-# JITTER
-# ============================================================
-
-def calculate_jitter(
-    results,
-    x_key,
-    y_key
-):
+def calculate_jitter(results, x_key, y_key):
 
     values = []
 
     point_ids = sorted(
-        set(
-            r["point_idx"]
-            for r in results
-        )
+        set(r["point_idx"] for r in results)
     )
 
     for point_idx in point_ids:
 
         rows = [
-
-            r
-
-            for r in results
-
+            r for r in results
             if r["point_idx"] == point_idx
-
         ]
 
         if len(rows) < 2:
             continue
 
         x = np.array(
-            [
-                r[x_key]
-                for r in rows
-            ],
-            dtype=float
+            [r[x_key] for r in rows],
+            dtype=float,
         )
 
         y = np.array(
-            [
-                r[y_key]
-                for r in rows
-            ],
-            dtype=float
+            [r[y_key] for r in rows],
+            dtype=float,
         )
 
         dx = np.diff(x)
         dy = np.diff(y)
 
         movement = np.sqrt(
-            dx ** 2
-            + dy ** 2
+            dx ** 2 + dy ** 2
         )
 
         values.extend(
             movement.tolist()
         )
 
-    if len(values) == 0:
+    if not values:
         return 0.0
 
-    return float(
-        np.mean(values)
-    )
+    return float(np.mean(values))
 
-
-# ============================================================
-# TOTAL VARIATION
-# ============================================================
 
 def calculate_total_variation(
     results,
     x_key,
-    y_key
+    y_key,
 ):
 
     total = 0.0
 
     point_ids = sorted(
-        set(
-            r["point_idx"]
-            for r in results
-        )
+        set(r["point_idx"] for r in results)
     )
 
     for point_idx in point_ids:
 
         rows = [
-
-            r
-
-            for r in results
-
+            r for r in results
             if r["point_idx"] == point_idx
-
         ]
 
         if len(rows) < 2:
             continue
 
         x = np.array(
-            [
-                r[x_key]
-                for r in rows
-            ],
-            dtype=float
+            [r[x_key] for r in rows],
+            dtype=float,
         )
 
         y = np.array(
-            [
-                r[y_key]
-                for r in rows
-            ],
-            dtype=float
+            [r[y_key] for r in rows],
+            dtype=float,
         )
 
         dx = np.diff(x)
@@ -836,8 +661,7 @@ def calculate_total_variation(
         total += float(
             np.sum(
                 np.sqrt(
-                    dx ** 2
-                    + dy ** 2
+                    dx ** 2 + dy ** 2
                 )
             )
         )
@@ -846,81 +670,52 @@ def calculate_total_variation(
 
 
 # ============================================================
-# PRINT METHOD
+# PRINT
 # ============================================================
 
 def print_method(
     name,
     results,
     x_key,
-    y_key
+    y_key,
 ):
 
     metrics = calculate_metrics(
         results,
         x_key,
-        y_key
+        y_key,
     )
 
     jitter = calculate_jitter(
         results,
         x_key,
-        y_key
+        y_key,
     )
 
     variation = calculate_total_variation(
         results,
         x_key,
-        y_key
+        y_key,
     )
 
     print()
     print(name)
-
-    print(
-        f"  MAE:     "
-        f"{metrics['MAE']:.2f} px"
-    )
-
-    print(
-        f"  RMSE:    "
-        f"{metrics['RMSE']:.2f} px"
-    )
-
-    print(
-        f"  Median:  "
-        f"{metrics['Median']:.2f} px"
-    )
-
-    print(
-        f"  P95:     "
-        f"{metrics['P95']:.2f} px"
-    )
-
-    print(
-        f"  Jitter:  "
-        f"{jitter:.2f} px/frame"
-    )
-
-    print(
-        f"  Total variation: "
-        f"{variation:.2f} px"
-    )
+    print(f"  MAE:             {metrics['MAE']:.2f} px")
+    print(f"  RMSE:            {metrics['RMSE']:.2f} px")
+    print(f"  Median:          {metrics['Median']:.2f} px")
+    print(f"  P95:             {metrics['P95']:.2f} px")
+    print(f"  Jitter:          {jitter:.2f} px/frame")
+    print(f"  Total variation: {variation:.2f} px")
 
 
 # ============================================================
-# SAVE RESULTS
+# SAVE
 # ============================================================
 
-def save_results(
-    results,
-    filename
-):
+def save_results(results, filename):
 
     fields = [
-
         "point_idx",
-
         "target_x",
         "target_y",
 
@@ -943,24 +738,21 @@ def save_results(
         "adaptive_qr_y",
 
         "confidence",
-
-        "head_motion"
-
+        "head_motion",
     ]
 
     with open(
         filename,
         "w",
-        newline=""
+        newline="",
     ) as f:
 
         writer = csv.DictWriter(
             f,
-            fieldnames=fields
+            fieldnames=fields,
         )
 
         writer.writeheader()
-
         writer.writerows(results)
 
 
@@ -971,308 +763,187 @@ def save_results(
 def main():
 
     print()
-    print("=" * 80)
-    print("FINAL GAZE EVALUATION")
-    print("=" * 80)
-    print()
+    print("=" * 90)
+    print("FINAL GAZE EVALUATION — YAW/PITCH HEAD + ADAPTIVE KF")
+    print("=" * 90)
 
-    # ========================================================
-    # CALIBRATION
-    # ========================================================
+    # --------------------------------------------------------
+    # Load calibration
+    # --------------------------------------------------------
 
-    calibration_raw = load_csv(
-        CALIBRATION_FILE
-    )
-
-    calibration_rows = valid_rows(
-        calibration_raw
+    calibration = valid_rows(
+        load_csv(CALIBRATION_FILE)
     )
 
     print(
-        f"Calibration samples: "
-        f"{len(calibration_rows)}"
+        f"Calibration samples: {len(calibration)}"
     )
 
-    if len(calibration_rows) == 0:
-
+    if not calibration:
         raise ValueError(
             "No valid calibration samples."
         )
 
-    # ========================================================
-    # FIT RIDGE
-    # ========================================================
+    # --------------------------------------------------------
+    # Fit Ridge
+    # --------------------------------------------------------
 
     print()
-    print(
-        "Fitting Ridge on CALIBRATION data only..."
-    )
+    print("Fitting Ridge on calibration data only...")
+    print()
+    print("Baseline features:")
+    print("  raw_gaze_yaw")
+    print("  raw_gaze_pitch")
 
-    (
-        baseline_mapper,
-        method2_mapper
-    ) = fit_mappers(
-        calibration_rows
-    )
+    print()
+    print("Method 2 features:")
+    print("  raw_gaze_yaw")
+    print("  raw_gaze_pitch")
+    print("  head_yaw")
+    print("  head_pitch")
+    print("  head_roll: EXCLUDED")
 
-    print(
-        "Ridge fitting complete."
-    )
-
-    # ========================================================
-    # EVALUATION
-    # ========================================================
-
-    evaluation_raw = load_csv(
-        EVALUATION_FILE
-    )
-
-    evaluation_rows = valid_rows(
-        evaluation_raw
+    baseline_mapper, method2_mapper = fit_mappers(
+        calibration
     )
 
     print()
+    print("Ridge fitting complete.")
 
-    print(
-        f"Evaluation samples: "
-        f"{len(evaluation_rows)}"
+    # --------------------------------------------------------
+    # Load evaluation
+    # --------------------------------------------------------
+
+    evaluation = valid_rows(
+        load_csv(EVALUATION_FILE)
     )
 
-    if len(evaluation_rows) == 0:
+    print(
+        f"Evaluation samples: {len(evaluation)}"
+    )
 
+    if not evaluation:
         raise ValueError(
             "No valid evaluation samples."
         )
 
-        # ========================================================
-    # HEAD POSE DIAGNOSTIC
-    # ========================================================
-
-    for name, rows_ in [
-        ("Calibration", calibration_rows),
-        ("Evaluation", evaluation_rows)
-    ]:
-
-        hy = np.array(
-            [r["head_yaw"] for r in rows_],
-            dtype=float
-        )
-
-        hp = np.array(
-            [r["head_pitch"] for r in rows_],
-            dtype=float
-        )
-
-        hr = np.array(
-            [r["head_roll"] for r in rows_],
-            dtype=float
-        )
-
-        print()
-        print(f"{name} head-pose statistics:")
-
-        print(
-            f"  Yaw:   "
-            f"mean={hy.mean():+.2f}, "
-            f"std={hy.std():.2f}, "
-            f"range=[{hy.min():.2f}, {hy.max():.2f}]"
-        )
-
-        print(
-            f"  Pitch: "
-            f"mean={hp.mean():+.2f}, "
-            f"std={hp.std():.2f}, "
-            f"range=[{hp.min():.2f}, {hp.max():.2f}]"
-        )
-
-        print(
-            f"  Roll:  "
-            f"mean={hr.mean():+.2f}, "
-            f"std={hr.std():.2f}, "
-            f"range=[{hr.min():.2f}, {hr.max():.2f}]"
-        )
-    # ========================================================
-    # EVALUATE
-    # ========================================================
+    # --------------------------------------------------------
+    # Evaluate
+    # --------------------------------------------------------
 
     results = evaluate(
-
-        evaluation_rows,
-
+        evaluation,
         baseline_mapper,
-
-        method2_mapper
-
+        method2_mapper,
     )
 
-    # ========================================================
-    # RESULTS
-    # ========================================================
+    # --------------------------------------------------------
+    # Results
+    # --------------------------------------------------------
 
     print()
-    print("=" * 80)
+    print("=" * 90)
     print("EVALUATION RESULTS")
-    print("=" * 80)
+    print("=" * 90)
 
     print_method(
-
         "Baseline: L2CS + Ridge (gaze only)",
-
         results,
-
         "baseline_x",
-        "baseline_y"
-
+        "baseline_y",
     )
 
     print_method(
-
-        "Method 2: L2CS + Head Pose + Ridge",
-
+        "Method 2: L2CS + Head Yaw/Pitch + Ridge",
         results,
-
         "ridge_x",
-        "ridge_y"
-
+        "ridge_y",
     )
 
     print_method(
-
         "Fixed Kalman",
-
         results,
-
         "fixed_kf_x",
-        "fixed_kf_y"
-
+        "fixed_kf_y",
     )
 
     print_method(
-
         "Adaptive Q Kalman",
-
         results,
-
         "adaptive_q_x",
-        "adaptive_q_y"
-
+        "adaptive_q_y",
     )
 
     print_method(
-
         "Adaptive R Kalman",
-
         results,
-
         "adaptive_r_x",
-        "adaptive_r_y"
-
+        "adaptive_r_y",
     )
 
     print_method(
-
         "Proposed: Adaptive Q + R",
-
         results,
-
         "adaptive_qr_x",
-        "adaptive_qr_y"
-
+        "adaptive_qr_y",
     )
 
-    # ========================================================
-    # SAVE
-    # ========================================================
+    # --------------------------------------------------------
+    # Save
+    # --------------------------------------------------------
 
     output_file = os.path.join(
-
-        os.path.dirname(
-            EVALUATION_FILE
-        ),
-
-        "final_evaluation_results.csv"
-
+        os.path.dirname(EVALUATION_FILE),
+        "final_evaluation_results.csv",
     )
 
     save_results(
         results,
-        output_file
+        output_file,
     )
 
     print()
+    print("=" * 90)
+    print("SAVED")
+    print("=" * 90)
+    print(output_file)
 
-    print(
-        f"Results saved to: "
-        f"{output_file}"
-    )
+    # --------------------------------------------------------
+    # Pipeline
+    # --------------------------------------------------------
 
     print()
-
-    print("=" * 80)
+    print("=" * 90)
     print("PIPELINE")
-    print("=" * 80)
+    print("=" * 90)
 
     print()
-
-    print(
-        "Baseline:"
-    )
-
-    print(
-        "L2CS -> Ridge(gaze only) -> screen"
-    )
+    print("Baseline:")
+    print("  L2CS -> Ridge(gaze only) -> screen")
 
     print()
-
-    print(
-        "Method 2:"
-    )
-
-    print(
-        "L2CS + Head Pose -> Ridge -> screen"
-    )
+    print("Method 2:")
+    print("  L2CS + Head Yaw/Pitch -> Ridge -> screen")
 
     print()
-
-    print(
-        "Fixed KF:"
-    )
-
-    print(
-        "Method 2 Ridge -> Fixed Constant-Velocity KF -> screen"
-    )
+    print("Fixed KF:")
+    print("  Method 2 Ridge -> Fixed KF -> screen")
 
     print()
-
-    print(
-        "Adaptive Q:"
-    )
-
-    print(
-        "Method 2 Ridge -> Head-Motion Adaptive Q KF -> screen"
-    )
+    print("Adaptive Q:")
+    print("  Method 2 Ridge -> Adaptive Q KF -> screen")
+    print("  Q adapts using head yaw/pitch motion")
 
     print()
-
-    print(
-        "Adaptive R:"
-    )
-
-    print(
-        "Method 2 Ridge -> Confidence Adaptive R KF -> screen"
-    )
+    print("Adaptive R:")
+    print("  Method 2 Ridge -> Adaptive R KF -> screen")
+    print("  R adapts using L2CS confidence")
 
     print()
-
-    print(
-        "Proposed:"
-    )
-
-    print(
-        "Method 2 Ridge -> Adaptive Q(head) + R(confidence) KF -> screen"
-    )
-
-    print()
+    print("Proposed:")
+    print("  Method 2 Ridge -> Adaptive Q+R KF -> screen")
+    print("  Q: head yaw/pitch motion")
+    print("  R: L2CS confidence")
 
 
 if __name__ == "__main__":
