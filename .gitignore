@@ -54,3 +54,5 @@ Thumbs.db
 # Ignore compiled Cython files
 *.c
 *.cpp
+dataset/
+evaluation_outputs/

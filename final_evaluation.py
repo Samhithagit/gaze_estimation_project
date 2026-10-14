@@ -355,10 +355,10 @@ def predict_method2(mapper, row):
 def create_filters():
 
     fixed = FixedKalmanGaze(
-        process_noise=KALMAN_PROCESS_NOISE,
-        measurement_noise=KALMAN_MEASUREMENT_NOISE,
-        initial_uncertainty=KALMAN_INITIAL_UNCERTAINTY,
-    )
+    process_noise_density=8e-4,
+    measurement_noise=0.2,
+    initial_uncertainty=KALMAN_INITIAL_UNCERTAINTY,
+)
 
     adaptive_q = AdaptiveQKalmanGaze(
         process_noise=KALMAN_PROCESS_NOISE,
@@ -468,12 +468,13 @@ def evaluate(
         # ====================================================
 
         fixed_result = fixed.update(
-            ridge_x,
-            ridge_y,
-        )
+    ridge_x,
+    ridge_y,
+)
 
-        fixed_x = float(fixed_result["x"])
-        fixed_y = float(fixed_result["y"])
+        fixed_x, fixed_y = fixed_result
+        fixed_x = float(fixed_x)
+        fixed_y = float(fixed_y)
 
         # ====================================================
         # ADAPTIVE Q

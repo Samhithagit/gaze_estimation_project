@@ -1,3 +1,6 @@
+import time
+from collections import deque
+
 import numpy as np
 
 
@@ -6,367 +9,247 @@ import numpy as np
 # ============================================================
 
 class FixedKalmanGaze:
-    """
-    Constant-velocity Kalman filter for screen-space gaze.
+    """Fixed constant-velocity gaze Kalman filter following the base paper.
 
-    State:
+    Paper-reported parameters:
+      process-noise density = 8e-4
+      measurement variance = 2e-1
 
-        [x, y, vx, vy]
+    State is [x, y, vx, vy]; measurements contain [screen_x, screen_y].
+    The paper specifies a dynamically adjusted time step but does not report
+    the initial covariance or spell out every element of Q. This class uses
+    the standard continuous white-acceleration covariance discretization.
 
-    Measurement:
-
-        [screen_x, screen_y]
-
-    The filter assumes that gaze position evolves with
-    approximately constant velocity between frames.
+    Compatibility note: adaptive subclasses retain their previous algorithm,
+    matrices, parameters, and dictionary return format. Only direct instances
+    of FixedKalmanGaze use the paper-style implementation below.
     """
 
     def __init__(
         self,
-        process_noise=25.0,
-        measurement_noise=100.0,
-        initial_uncertainty=100.0,
-        dt=1.0
+        process_noise=8e-4,
+        measurement_noise=0.2,
+        initial_uncertainty=1.0,
+        dt=1.0,
+        process_noise_density=None,
     ):
-
-        self.process_noise = float(
-            process_noise
-        )
-
-        self.measurement_noise = float(
-            measurement_noise
-        )
-
-        self.initial_uncertainty = float(
-            initial_uncertainty
-        )
-
+        if process_noise_density is not None:
+            process_noise = process_noise_density
+        self.process_noise = float(process_noise)
+        self.measurement_noise = float(measurement_noise)
+        self.initial_uncertainty = float(initial_uncertainty)
         self.dt = float(dt)
+        if self.dt <= 0:
+            raise ValueError("dt must be positive")
+        if self.process_noise < 0:
+            raise ValueError("process_noise must be non-negative")
+        if self.measurement_noise <= 0:
+            raise ValueError("measurement_noise must be positive")
+        if self.initial_uncertainty <= 0:
+            raise ValueError("initial_uncertainty must be positive")
 
-        # ----------------------------------------------------
-        # STATE TRANSITION MATRIX
-        #
-        # x'  = x + vx * dt
-        # y'  = y + vy * dt
-        # vx' = vx
-        # vy' = vy
-        # ----------------------------------------------------
-
-        self.A = np.array([
-
-            [1.0, 0.0, self.dt, 0.0],
-
-            [0.0, 1.0, 0.0, self.dt],
-
-            [0.0, 0.0, 1.0, 0.0],
-
-            [0.0, 0.0, 0.0, 1.0]
-
-        ], dtype=np.float64)
-
-        # ----------------------------------------------------
-        # MEASUREMENT MATRIX
-        #
-        # We observe x and y only.
-        # ----------------------------------------------------
-
-        self.H = np.array([
-
-            [1.0, 0.0, 0.0, 0.0],
-
-            [0.0, 1.0, 0.0, 0.0]
-
-        ], dtype=np.float64)
-
-        # ----------------------------------------------------
-        # Base Q
-        #
-        # Standard constant-velocity process-noise structure.
-        # ----------------------------------------------------
-
-        self.Q = self._build_Q(
-            self.process_noise
-        )
-
-        # ----------------------------------------------------
-        # Measurement noise
-        # ----------------------------------------------------
-
-        self.R = (
-            np.eye(
-                2,
-                dtype=np.float64
-            )
-            * self.measurement_noise
-        )
-
-        # ----------------------------------------------------
-        # Initial covariance
-        # ----------------------------------------------------
-
-        self.P = (
-            np.eye(
-                4,
-                dtype=np.float64
-            )
-            * self.initial_uncertainty
-        )
-
+        self.A = self._transition(self.dt)
+        self.H = np.array([[1., 0., 0., 0.], [0., 1., 0., 0.]], dtype=np.float64)
+        self.Q = self._build_paper_Q(self.dt)
+        self.R = np.eye(2, dtype=np.float64) * self.measurement_noise
+        self.P = np.eye(4, dtype=np.float64) * self.initial_uncertainty
         self.state = None
-
         self.last_innovation = None
         self.last_innovation_magnitude = None
+        self._last_timestamp = None
 
-    # ========================================================
-    # BUILD PROCESS NOISE MATRIX
-    # ========================================================
+    @staticmethod
+    def _transition(dt):
+        return np.array([
+            [1., 0., dt, 0.],
+            [0., 1., 0., dt],
+            [0., 0., 1., 0.],
+            [0., 0., 0., 1.],
+        ], dtype=np.float64)
+
+    def _build_paper_Q(self, dt):
+        # Discrete white-acceleration process noise for x and y axes.
+        d2, d3, d4 = dt**2, dt**3, dt**4
+        q = self.process_noise
+        return q * np.array([
+            [d4/4, 0., d3/2, 0.],
+            [0., d4/4, 0., d3/2],
+            [d3/2, 0., d2, 0.],
+            [0., d3/2, 0., d2],
+        ], dtype=np.float64)
 
     def _build_Q(self, q_value):
-
+        # Kept unchanged in meaning for adaptive subclasses' existing model.
         dt = self.dt
-
         G = np.array([
-
-            [0.5 * dt ** 2, 0.0],
-
-            [0.0, 0.5 * dt ** 2],
-
-            [dt, 0.0],
-
-            [0.0, dt]
-
+            [0.5 * dt**2, 0.], [0., 0.5 * dt**2],
+            [dt, 0.], [0., dt],
         ], dtype=np.float64)
-
-        return (
-            q_value
-            * (G @ G.T)
-        )
-
-    # ========================================================
-    # RESET
-    # ========================================================
+        return float(q_value) * (G @ G.T)
 
     def reset(self):
-
-        self.P = (
-            np.eye(
-                4,
-                dtype=np.float64
-            )
-            * self.initial_uncertainty
-        )
-
+        self.P = np.eye(4, dtype=np.float64) * self.initial_uncertainty
         self.state = None
-
         self.last_innovation = None
         self.last_innovation_magnitude = None
+        self._last_timestamp = None
 
-    # ========================================================
-    # MEASUREMENT
-    # ========================================================
-
-    def _get_measurement(
-        self,
-        screen_x,
-        screen_y
-    ):
-
+    def _get_measurement(self, screen_x, screen_y):
         try:
-
-            measurement = np.array([
-
-                float(screen_x),
-                float(screen_y)
-
-            ], dtype=np.float64)
-
-        except (
-            TypeError,
-            ValueError
-        ):
-
+            z = np.array([float(screen_x), float(screen_y)], dtype=np.float64)
+        except (TypeError, ValueError):
             return None
+        return z if np.all(np.isfinite(z)) else None
 
-        if not np.all(
-            np.isfinite(measurement)
-        ):
-
-            return None
-
-        return measurement
-
-    # ========================================================
-    # UPDATE
-    # ========================================================
-
-    def update(
-        self,
-        screen_x,
-        screen_y,
-        confidence=None,
-        head_motion=None,
-        measurement_valid=True
-    ):
-
-        measurement = self._get_measurement(
-            screen_x,
-            screen_y
-        )
-
-        if measurement is None:
-
-            return None
-
-        # ----------------------------------------------------
-        # INITIALIZATION
-        # ----------------------------------------------------
-
-        if self.state is None:
-
-            self.state = np.array([
-
-                measurement[0],
-                measurement[1],
-                0.0,
-                0.0
-
-            ], dtype=np.float64)
-
-            return {
-
-                "x": float(self.state[0]),
-                "y": float(self.state[1]),
-                "vx": float(self.state[2]),
-                "vy": float(self.state[3]),
-                "innovation": 0.0
-
-            }
-
-        # ----------------------------------------------------
-        # PREDICTION
-        # ----------------------------------------------------
-
-        predicted_state = (
-            self.A @ self.state
-        )
-
-        predicted_covariance = (
-            self.A
-            @ self.P
-            @ self.A.T
-            + self.Q
-        )
-
-        # ----------------------------------------------------
-        # INVALID MEASUREMENT
-        #
-        # Prediction only.
-        # ----------------------------------------------------
-
-        if not measurement_valid:
-
-            self.state = predicted_state
-
-            self.P = predicted_covariance
-
-            return {
-
-                "x": float(self.state[0]),
-                "y": float(self.state[1]),
-                "vx": float(self.state[2]),
-                "vy": float(self.state[3]),
-                "innovation": None
-
-            }
-
-        # ----------------------------------------------------
-        # INNOVATION
-        # ----------------------------------------------------
-
-        innovation = (
-
-            measurement
-            - self.H @ predicted_state
-
-        )
-
-        innovation_magnitude = float(
-            np.linalg.norm(
-                innovation
-            )
-        )
-
-        self.last_innovation = (
-            innovation.copy()
-        )
-
-        self.last_innovation_magnitude = (
-            innovation_magnitude
-        )
-
-        # ----------------------------------------------------
-        # INNOVATION COVARIANCE
-        # ----------------------------------------------------
-
-        innovation_covariance = (
-
-            self.H
-            @ predicted_covariance
-            @ self.H.T
-            + self.R
-
-        )
-
-        # ----------------------------------------------------
-        # KALMAN GAIN
-        # ----------------------------------------------------
-
-        kalman_gain = (
-
-            predicted_covariance
-            @ self.H.T
-            @ np.linalg.inv(
-                innovation_covariance
-            )
-
-        )
-
-        # ----------------------------------------------------
-        # STATE UPDATE
-        # ----------------------------------------------------
-
-        self.state = (
-
-            predicted_state
-            + kalman_gain @ innovation
-
-        )
-
-        # ----------------------------------------------------
-        # COVARIANCE UPDATE
-        # ----------------------------------------------------
-
-        identity = np.eye(
-            4,
-            dtype=np.float64
-        )
-
-        self.P = (
-
-            identity
-            - kalman_gain @ self.H
-
-        ) @ predicted_covariance
-
+    def _format_output(self):
+        x, y = float(self.state[0]), float(self.state[1])
+        if type(self) is FixedKalmanGaze:
+            return (x, y)
         return {
-
-            "x": float(self.state[0]),
-            "y": float(self.state[1]),
-            "vx": float(self.state[2]),
-            "vy": float(self.state[3]),
-            "innovation": innovation_magnitude
-
+            "x": x, "y": y,
+            "vx": float(self.state[2]), "vy": float(self.state[3]),
+            "innovation": self.last_innovation_magnitude,
         }
+
+    def update(self, screen_x, screen_y, confidence=None, head_motion=None,
+               measurement_valid=True, timestamp=None):
+        # Preserve the adaptive filters' prior implementation/API exactly.
+        if type(self) is not FixedKalmanGaze:
+            measurement = self._get_measurement(screen_x, screen_y) if measurement_valid else None
+            if self.state is None:
+                if measurement is None:
+                    return None
+                self.state = np.array([measurement[0], measurement[1], 0., 0.], dtype=np.float64)
+                return self._format_output()
+            predicted_state = self.A @ self.state
+            predicted_covariance = self.A @ self.P @ self.A.T + self.Q
+            if measurement is None:
+                self.state, self.P = predicted_state, predicted_covariance
+                self.last_innovation = self.last_innovation_magnitude = None
+                return self._format_output()
+            innovation = measurement - self.H @ predicted_state
+            S = self.H @ predicted_covariance @ self.H.T + self.R
+            K = np.linalg.solve(S, self.H @ predicted_covariance).T
+            self.state = predicted_state + K @ innovation
+            I_KH = np.eye(4, dtype=np.float64) - K @ self.H
+            self.P = I_KH @ predicted_covariance @ I_KH.T + K @ self.R @ K.T
+            self.P = 0.5 * (self.P + self.P.T)
+            self.last_innovation = innovation.copy()
+            self.last_innovation_magnitude = float(np.linalg.norm(innovation))
+            return self._format_output()
+
+        # The paper describes dynamic dt. Use a supplied timestamp when present;
+        # otherwise use elapsed wall-clock time, with the configured dt on frame 1.
+        import time
+        now = float(timestamp) if timestamp is not None else time.monotonic()
+        if self._last_timestamp is None:
+            dt = self.dt
+        else:
+            dt = now - self._last_timestamp
+            if not np.isfinite(dt) or dt <= 0:
+                dt = self.dt
+        self._last_timestamp = now
+        self.A = self._transition(dt)
+        self.Q = self._build_paper_Q(dt)
+
+        z = self._get_measurement(screen_x, screen_y) if measurement_valid else None
+        if self.state is None:
+            if z is None:
+                return None
+            self.state = np.array([z[0], z[1], 0., 0.], dtype=np.float64)
+            return self._format_output()
+
+        x_pred = self.A @ self.state
+        P_pred = self.A @ self.P @ self.A.T + self.Q
+        if z is None:
+            self.state, self.P = x_pred, P_pred
+            self.last_innovation = self.last_innovation_magnitude = None
+            return self._format_output()
+
+        innovation = z - self.H @ x_pred
+        S = self.H @ P_pred @ self.H.T + self.R
+        K = np.linalg.solve(S, self.H @ P_pred).T
+        self.state = x_pred + K @ innovation
+        I_KH = np.eye(4, dtype=np.float64) - K @ self.H
+        self.P = I_KH @ P_pred @ I_KH.T + K @ self.R @ K.T
+        self.P = 0.5 * (self.P + self.P.T)
+        self.last_innovation = innovation.copy()
+        self.last_innovation_magnitude = float(np.linalg.norm(innovation))
+        return self._format_output()
+
+
+
+
+# ============================================================
+# FIXED PIPELINE: 5-FRAME MOVING MEDIAN -> FIXED KALMAN
+# ============================================================
+
+class MovingMedianGaze:
+    """Moving median over the latest five gaze-coordinate measurements."""
+
+    def __init__(self, window_size=5):
+        if window_size < 1:
+            raise ValueError("window_size must be at least 1")
+        self.window_size = int(window_size)
+        self.buffer = deque(maxlen=self.window_size)
+
+    def reset(self):
+        self.buffer.clear()
+
+    def update(self, x, y):
+        try:
+            measurement = np.array([float(x), float(y)], dtype=np.float64)
+        except (TypeError, ValueError):
+            return None
+
+        if not np.all(np.isfinite(measurement)):
+            return None
+
+        self.buffer.append(measurement)
+        samples = np.asarray(self.buffer, dtype=np.float64)
+        median = np.median(samples, axis=0)
+        return float(median[0]), float(median[1])
+
+
+class FixedKalmanGazePipeline:
+    """Apply the 5-frame moving median first, then the fixed Kalman filter.
+
+    Use this wrapper for the paper-style fixed baseline. Adaptive Kalman
+    classes remain separate and are not routed through the median filter.
+    """
+
+    def __init__(self, window_size=5, **kalman_kwargs):
+        self.median = MovingMedianGaze(window_size=window_size)
+        self.kalman = FixedKalmanGaze(**kalman_kwargs)
+
+    def reset(self):
+        self.median.reset()
+        self.kalman.reset()
+
+    def update(self, screen_x, screen_y, measurement_valid=True, timestamp=None):
+        if not measurement_valid:
+            # Let the Kalman filter advance using prediction only; do not add
+            # an invalid measurement to the moving-median buffer.
+            return self.kalman.update(
+                screen_x, screen_y,
+                measurement_valid=False,
+                timestamp=timestamp,
+            )
+
+        median_measurement = self.median.update(screen_x, screen_y)
+        if median_measurement is None:
+            return self.kalman.update(
+                screen_x, screen_y,
+                measurement_valid=False,
+                timestamp=timestamp,
+            )
+
+        median_x, median_y = median_measurement
+        return self.kalman.update(
+            median_x, median_y,
+            measurement_valid=True,
+            timestamp=timestamp,
+        )
 
 
 # ============================================================
