@@ -112,9 +112,18 @@ class FixedKalmanGaze:
         }
 
     def update(self, screen_x, screen_y, confidence=None, head_motion=None,
-               measurement_valid=True, timestamp=None):
+               measurement_valid=True, timestamp=None, dt=None):
         # Preserve the adaptive filters' prior implementation/API exactly.
         if type(self) is not FixedKalmanGaze:
+            if dt is not None:
+                dt_value = float(dt)
+                if np.isfinite(dt_value) and dt_value > 0:
+                    self.dt = dt_value
+                    self.A = self._transition(dt_value)
+                    # Preserve the current adaptive Q level when present; rebuild
+                    # its matrix for the new dt. Adaptive-R-only uses base process noise.
+                    q_value = getattr(self, "current_q", self.process_noise)
+                    self.Q = self._build_Q(q_value)
             measurement = self._get_measurement(screen_x, screen_y) if measurement_valid else None
             if self.state is None:
                 if measurement is None:
