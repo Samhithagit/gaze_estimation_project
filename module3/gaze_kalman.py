@@ -693,3 +693,142 @@ class AdaptiveQRKalmanGaze(FixedKalmanGaze):
             head_motion=head_motion,
             measurement_valid=measurement_valid
         )
+
+
+# ============================================================
+# ADDITIONAL FILTERS (original classes above are unchanged)
+# ============================================================
+
+# ============================================================
+# NEW METHODS (separate from the paper-style fixed KF)
+# ============================================================
+
+class DoubleExponentialSmoothingGaze:
+    """Holt double exponential smoothing for 2-D gaze coordinates."""
+    def __init__(self, alpha=0.28, beta=0.045, max_trend_step=35.0):
+        if not 0.0 < alpha <= 1.0 or not 0.0 <= beta <= 1.0:
+            raise ValueError("alpha must be in (0,1] and beta in [0,1]")
+        self.alpha, self.beta = float(alpha), float(beta)
+        self.max_trend_step = float(max_trend_step)
+        self.reset()
+
+    def reset(self):
+        self.level = None
+        self.trend = np.zeros(2, dtype=np.float64)
+
+    def update(self, x, y):
+        z = np.asarray([x, y], dtype=np.float64)
+        if not np.all(np.isfinite(z)):
+            return None
+        if self.level is None:
+            self.level = z.copy()
+            self.trend[:] = 0.0
+            return float(z[0]), float(z[1])
+        prediction = self.level + self.trend
+        residual = z - prediction
+        magnitude = float(np.linalg.norm(residual))
+        if self.max_trend_step > 0 and magnitude > self.max_trend_step:
+            residual *= self.max_trend_step / magnitude
+        old_level = self.level.copy()
+        self.level = self.alpha * z + (1.0 - self.alpha) * prediction
+        self.trend = self.beta * (self.level - old_level) + (1.0 - self.beta) * self.trend
+        return float(self.level[0]), float(self.level[1])
+
+
+
+class AdaptiveAlphaBetaGaze:
+    """Confidence- and innovation-gated alpha-beta gaze tracker."""
+    def __init__(self, alpha_min=0.08, alpha_max=0.55, beta=0.045,
+                 confidence_power=1.8, outlier_scale=65.0, max_speed=45.0):
+        self.alpha_min, self.alpha_max = float(alpha_min), float(alpha_max)
+        self.beta = float(beta)
+        self.confidence_power = float(confidence_power)
+        self.outlier_scale = float(outlier_scale)
+        self.max_speed = float(max_speed)
+        self.reset()
+
+    def reset(self):
+        self.position = None
+        self.velocity = np.zeros(2, dtype=np.float64)
+
+    def update(self, x, y, confidence=None, head_motion=None):
+        z = np.asarray([x, y], dtype=np.float64)
+        if not np.all(np.isfinite(z)):
+            return None
+        confidence = 0.5 if confidence is None else float(np.clip(confidence, 0.0, 1.0))
+        if self.position is None:
+            self.position = z.copy()
+            self.velocity[:] = 0.0
+            return float(z[0]), float(z[1])
+        prediction = self.position + self.velocity
+        innovation = z - prediction
+        magnitude = float(np.linalg.norm(innovation))
+        conf_gain = confidence ** self.confidence_power
+        outlier_gain = 1.0 / (1.0 + (magnitude / max(self.outlier_scale, 1e-6)) ** 2)
+        alpha = self.alpha_min + (self.alpha_max - self.alpha_min) * conf_gain * outlier_gain
+        self.position = prediction + alpha * innovation
+        self.velocity += self.beta * alpha * innovation
+        speed = float(np.linalg.norm(self.velocity))
+        if speed > self.max_speed:
+            self.velocity *= self.max_speed / speed
+        return float(self.position[0]), float(self.position[1])
+
+
+class ConfidenceAdaptiveEMAGaze:
+    """EMA whose gain increases with confidence and credible movement."""
+    def __init__(self, min_alpha=0.12, max_alpha=0.52, confidence_power=1.5,
+                 movement_scale=35.0, max_step=45.0):
+        self.min_alpha = float(min_alpha)
+        self.max_alpha = float(max_alpha)
+        self.confidence_power = float(confidence_power)
+        self.movement_scale = float(movement_scale)
+        self.max_step = float(max_step)
+        self.reset()
+
+    def reset(self):
+        self.value = None
+
+    def update(self, x, y, confidence=None):
+        z = np.asarray([x, y], dtype=np.float64)
+        if not np.all(np.isfinite(z)):
+            return None
+        if self.value is None:
+            self.value = z.copy()
+            return float(z[0]), float(z[1])
+        confidence = 0.5 if confidence is None else float(np.clip(confidence, 0.0, 1.0))
+        delta = z - self.value
+        distance = float(np.linalg.norm(delta))
+        # A large jump only increases responsiveness gradually, reducing outlier sensitivity.
+        movement = distance / (distance + max(self.movement_scale, 1e-6))
+        trust = confidence ** self.confidence_power
+        alpha = self.min_alpha + (self.max_alpha - self.min_alpha) * (0.75 * trust + 0.25 * movement)
+        if self.max_step > 0 and distance > self.max_step:
+            delta *= self.max_step / distance
+        self.value = self.value + alpha * delta
+        return float(self.value[0]), float(self.value[1])
+
+
+class InnovationClippedHoltGaze(DoubleExponentialSmoothingGaze):
+    """Holt smoother that clips large measurement innovations before updating level/trend."""
+    def __init__(self, alpha=0.24, beta=0.035, innovation_limit=28.0, max_trend_step=22.0):
+        super().__init__(alpha=alpha, beta=beta, max_trend_step=max_trend_step)
+        self.innovation_limit = float(innovation_limit)
+
+    def update(self, x, y):
+        z = np.asarray([x, y], dtype=np.float64)
+        if not np.all(np.isfinite(z)):
+            return None
+        if self.level is None:
+            self.level = z.copy()
+            self.trend[:] = 0.0
+            return float(z[0]), float(z[1])
+        prediction = self.level + self.trend
+        residual = z - prediction
+        magnitude = float(np.linalg.norm(residual))
+        if self.innovation_limit > 0 and magnitude > self.innovation_limit:
+            residual *= self.innovation_limit / magnitude
+        robust_z = prediction + residual
+        old_level = self.level.copy()
+        self.level = self.alpha * robust_z + (1.0 - self.alpha) * prediction
+        self.trend = self.beta * (self.level - old_level) + (1.0 - self.beta) * self.trend
+        return float(self.level[0]), float(self.level[1])
