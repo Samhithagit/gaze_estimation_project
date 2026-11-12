@@ -4,6 +4,64 @@ from collections import deque
 import numpy as np
 
 
+
+
+class OneEuroScalar:
+    """One Euro low-pass filter for one scalar coordinate."""
+
+    def __init__(self, min_cutoff=1.5, beta=0.01, d_cutoff=1.5):
+        self.min_cutoff = float(min_cutoff)
+        self.beta = float(beta)
+        self.d_cutoff = float(d_cutoff)
+        self.reset()
+
+    def reset(self):
+        self.t = None
+        self.x = None
+        self.dx = 0.0
+
+    @staticmethod
+    def _alpha(cutoff, dt):
+        tau = 1.0 / (2.0 * np.pi * cutoff)
+        return 1.0 / (1.0 + tau / dt)
+
+    def update(self, value, timestamp):
+        value = float(value)
+        timestamp = float(timestamp)
+        if self.t is None:
+            self.t, self.x, self.dx = timestamp, value, 0.0
+            return value
+        dt = max(1e-3, timestamp - self.t)
+        self.t = timestamp
+        a_d = self._alpha(self.d_cutoff, dt)
+        derivative = (value - self.x) / dt
+        self.dx = a_d * derivative + (1.0 - a_d) * self.dx
+        cutoff = self.min_cutoff + self.beta * abs(self.dx)
+        alpha = self._alpha(cutoff, dt)
+        self.x = alpha * value + (1.0 - alpha) * self.x
+        return float(self.x)
+
+
+class OneEuroGaze:
+    """Independent One Euro filters for screen-space x and y coordinates."""
+
+    def __init__(self, min_cutoff=1.5, beta=0.01, d_cutoff=1.5):
+        self.min_cutoff = float(min_cutoff)
+        self.beta = float(beta)
+        self.d_cutoff = float(d_cutoff)
+        self.reset()
+
+    def reset(self):
+        self.fx = OneEuroScalar(self.min_cutoff, self.beta, self.d_cutoff)
+        self.fy = OneEuroScalar(self.min_cutoff, self.beta, self.d_cutoff)
+
+    def update(self, x, y, timestamp=0.0):
+        try:
+            return (self.fx.update(x, timestamp), self.fy.update(y, timestamp))
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+
 # ============================================================
 # FIXED KALMAN
 # ============================================================

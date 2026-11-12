@@ -1,10 +1,19 @@
 # Minimal requirements inferred from project imports
-opencv-python
+
+opencv-python==5.0.0.93
 toml
-numpy
-mediapipe
+numpy==2.2.6
+mediapipe==0.10.9
 torch
 torchvision
-l2cs
+transformers
+wordfreq
+Pillow
+matplotlib
+pandas
+scipy
+scikit-learn
+screeninfo
+pyspellchecker
 
 # Note: Pin specific versions or install torch with CUDA as needed.

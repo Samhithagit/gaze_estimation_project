@@ -56,3 +56,6 @@ Thumbs.db
 *.cpp
 dataset/
 evaluation_outputs/
+*.csv
+*.txt
+!requirements.txt

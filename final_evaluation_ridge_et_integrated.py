@@ -25,6 +25,7 @@ from module3.gaze_kalman import (
     ConfidenceAdaptiveEMAGaze,
     InnovationClippedHoltGaze,
     AdaptiveAlphaBetaGaze,
+    OneEuroGaze,
 )
 
 
@@ -812,6 +813,8 @@ def evaluate(
     # ------------------------------------------------------------
     et_paper_fixed, et_matched_fixed, et_adaptive_q, et_adaptive_r, et_proposed = create_filters()
     et_median_filter = MovingMedianGaze(window_size=MEDIAN_WINDOW_SIZE)
+    # Separate One Euro chain: same median preprocessing as the live keyboard pipeline.
+    et_one_euro = OneEuroGaze(min_cutoff=1.5, beta=0.01)
     et_double_exp = DoubleExponentialSmoothingGaze(
         alpha=0.28, beta=0.045, max_trend_step=35.0
     )
@@ -858,6 +861,7 @@ def evaluate(
             robust_holt.reset()
             # Reset the independent Extra Trees filter chain at the same target boundary.
             et_median_filter.reset()
+            et_one_euro.reset()
             et_paper_fixed.reset()
             et_matched_fixed.reset()
             et_adaptive_q.reset()
@@ -1102,6 +1106,9 @@ def evaluate(
         et_raw_x = regression_predictions["reg_extra_trees_x"]
         et_raw_y = regression_predictions["reg_extra_trees_y"]
         et_median_x, et_median_y = et_median_filter.update(et_raw_x, et_raw_y)
+        one_euro_x, one_euro_y = et_one_euro.update(
+            et_median_x, et_median_y, timestamp=filter_timestamp
+        )
 
         et_paper_result = et_paper_fixed.update(
             et_median_x, et_median_y, timestamp=filter_timestamp
@@ -1207,6 +1214,8 @@ def evaluate(
             "et_raw_y": et_raw_y,
             "et_median_x": float(et_median_x),
             "et_median_y": float(et_median_y),
+            "one_euro_x": float(one_euro_x),
+            "one_euro_y": float(one_euro_y),
             "et_fixed_kf_x": et_fixed_x,
             "et_fixed_kf_y": et_fixed_y,
             "et_matched_fixed_kf_x": et_matched_x,
@@ -1686,6 +1695,7 @@ def main():
         ("Adaptive R + Extra Trees", "et_adaptive_r_x", "et_adaptive_r_y"),
         ("Extra Trees + Double Exp.", "et_double_exp_x", "et_double_exp_y"),
         ("Extra Trees + Clipped Holt", "et_robust_holt_x", "et_robust_holt_y"),
+        ("One Euro Filter", "one_euro_x", "one_euro_y"),
     ]:
         print_method(label, results, x_key, y_key)
 

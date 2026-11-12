@@ -34,12 +34,12 @@ class GazeEstimator:
 
         self.fc_yaw_gaze = nn.Linear(
             2048,
-            90
+            28
         )
 
         self.fc_pitch_gaze = nn.Linear(
             2048,
-            90
+            28
         )
 
         # =====================================================
@@ -145,7 +145,7 @@ class GazeEstimator:
         # GAZE BINS
         # =====================================================
 
-        self.num_bins = 90
+        self.num_bins = 28
 
         self.angle_min = -90.0
         self.angle_max = 90.0

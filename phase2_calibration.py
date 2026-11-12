@@ -38,7 +38,7 @@ PROJECT_DIR = os.path.dirname(
 MODEL_PATH = os.path.join(
     PROJECT_DIR,
     "models",
-    "L2CSNet_gaze360.pkl"
+    "L2CSNet_mpiigaze.pkl"
 )
 
 CAMERA_ID = 0

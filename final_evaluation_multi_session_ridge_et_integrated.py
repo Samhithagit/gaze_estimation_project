@@ -16,7 +16,7 @@ OUTPUT_DIR = ROOT / "evaluation_outputs"
 NORMALIZED_DIR = OUTPUT_DIR / "normalized_inputs"
 
 EVALUATOR_CANDIDATES = [
-    ROOT / "final_evaluation_ridge_et_integrated.py",
+    ROOT / "final_evaluation_ridge_et_integrated_one_euro.py",
 ]
 
 COLUMN_ALIASES = {
@@ -39,6 +39,7 @@ METHODS = {
     "Adaptive R + Extra Trees": ("et_adaptive_r_x", "et_adaptive_r_y"),
     "Extra Trees + Double Exp.": ("et_double_exp_x", "et_double_exp_y"),
     "Extra Trees + Clipped Holt": ("et_robust_holt_x", "et_robust_holt_y"),
+    "One Euro Filter": ("one_euro_x", "one_euro_y"),
 }
 REPORT_METHODS = [
     ("Baseline", "Baseline"),
@@ -50,6 +51,7 @@ REPORT_METHODS = [
     ("Adaptive R + Extra Trees", "Adaptive R + Extra Trees"),
     ("Extra Trees + Double Exp.", "Extra Trees + Double Exp."),
     ("Extra Trees + Clipped Holt", "Extra Trees + Clipped Holt"),
+    ("One Euro Filter", "One Euro Filter"),
 ]
 REQUIRED_COLUMNS = [
     "raw_gaze_yaw", "raw_gaze_pitch", "raw_confidence",
